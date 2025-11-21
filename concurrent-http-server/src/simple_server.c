@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <time.h>
+#include "config.h"
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -201,6 +202,13 @@ void send_file(int client_fd, const char* fullpath, int send_body) {
 }
 
 int main(void) {
+    // lê configuração antes de tudo
+    server_config_t config;
+    if (load_config("server.conf", &config) != 0) {
+        printf("Erro a ler server.conf\n");
+        exit(1);
+    }
+
     // cria socket TCP IPv4
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -221,7 +229,7 @@ int main(void) {
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    address.sin_port = htons(config.port);   // ← PORTO VINDO DA CONFIG
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -236,7 +244,7 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %d...\n", PORT);
+    printf("Server listening on port %d...\n", config.port);
 
     // loop principal: aceita e trata pedidos sequencialmente
     while (1) {
@@ -253,12 +261,10 @@ int main(void) {
             continue;
         }
 
-        // garantir string terminada
         buffer[bytes] = '\0';
 
         HttpRequest req;
         if (parse_http_request(buffer, &req) != 0) {
-            // pedido inválido → 400
             send_error(client_fd,
                        "HTTP/1.1 400 Bad Request",
                        "<h1>400 Bad Request</h1>");
@@ -266,7 +272,7 @@ int main(void) {
             continue;
         }
 
-        // sanitização básica do caminho para evitar directory traversal
+        // atacar directory traversal
         if (strstr(req.path, "..") != NULL) {
             send_error(client_fd,
                        "HTTP/1.1 403 Forbidden",
@@ -275,9 +281,8 @@ int main(void) {
             continue;
         }
 
-        // só GET e HEAD são suportados
+        // só suportamos GET e HEAD
         if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
-            // método não implementado → 501
             send_error(client_fd,
                        "HTTP/1.1 501 Not Implemented",
                        "<h1>501 Not Implemented</h1>");
@@ -285,15 +290,14 @@ int main(void) {
             continue;
         }
 
-        // constrói caminho real a partir da DOCUMENT_ROOT "./www"
+        // constrói caminho real usando DOCUMENT_ROOT da config
         char fullpath[1024];
         if (strcmp(req.path, "/") == 0) {
-            snprintf(fullpath, sizeof(fullpath), "./www/index.html");
+            snprintf(fullpath, sizeof(fullpath), "%s/index.html", config.document_root);
         } else {
-            snprintf(fullpath, sizeof(fullpath), "./www%s", req.path);
+            snprintf(fullpath, sizeof(fullpath), "%s%s", config.document_root, req.path);
         }
 
-        // decide se envia corpo (HEAD não envia)
         int send_body = strcmp(req.method, "HEAD") != 0;
         send_file(client_fd, fullpath, send_body);
         close(client_fd);
