@@ -35,18 +35,20 @@ void send_error(int client_fd, const char* status_line, const char* body) {
 
     char date_header[128];
     time_t now = time(NULL);
-    
     struct tm *gmt = gmtime(&now);
     strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
 
     snprintf(headers, sizeof(headers),
-             "%s\r\n"
-             "Content-Type: text/html\r\n"
-             "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
-             "\r\n",
-             status_line, body_len);
+    "%s\r\n"
+    "Content-Type: text/html\r\n"
+    "Content-Length: %zu\r\n"
+    "Server: ConcurrentHTTP/1.0\r\n"
+    "Date: %s\r\n"
+    "Connection: close\r\n"
+    "\r\n",
+    status_line, body_len, date_header);
 
+    
     send(client_fd, headers, strlen(headers), 0);
     send(client_fd, body, body_len, 0);
 }
@@ -161,16 +163,24 @@ void send_file(int client_fd, const char* fullpath, int send_body) {
         return;
     }
 
+    char date_header[128];
+    time_t now = time(NULL);
+    struct tm *gmt = gmtime(&now);
+    strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+
     // headers 200 OK
     const char* mime = get_mime_type(fullpath);
     char headers[256];
     snprintf(headers, sizeof(headers),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: %s\r\n"
-             "Content-Length: %ld\r\n"
-             "Connection: close\r\n"
-             "\r\n",
-             mime, file_size);
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Server: ConcurrentHTTP/1.0\r\n"
+        "Date: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        mime, file_size, date_header);
+
 
     send(client_fd, headers, strlen(headers), 0);
 
