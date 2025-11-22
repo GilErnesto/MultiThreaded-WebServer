@@ -2,6 +2,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <time.h>
+#include <stdlib.h>
 
 #include "worker.h"
 #include "http.h"
@@ -11,44 +13,95 @@ typedef struct {
     shared_data_t   *shared;
     semaphores_t    *sems;
     server_config_t *config;
+    FILE            *log_fp;
 } worker_thread_args_t;
 
+static void log_request(worker_thread_args_t *args,
+                        const char *method,
+                        const char *path,
+                        const char *version,
+                        int status_code,
+                        long bytes_sent)
+{
+    char timebuf[64];
+    time_t now = time(NULL);
+    struct tm *lt = localtime(&now);
+    strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S %z", lt);
+
+    // Formato aproximado de Apache Combined Log:
+    // %h %l %u [%t] "%r" %>s %b "%{Referer}i" "%{User-agent}i"
+    //
+    // Aqui não temos IP, user, referer, user-agent → usamos "-"
+    sem_wait(args->sems->log);
+    fprintf(args->log_fp,
+            "- - - [%s] \"%s %s %s\" %d %ld \"-\" \"-\"\n",
+            timebuf,
+            method  ? method  : "-",
+            path    ? path    : "-",
+            version ? version : "-",
+            status_code,
+            bytes_sent);
+    fflush(args->log_fp);
+    sem_post(args->sems->log);
+}
+
 // trata um pedido HTTP num socket já aceite
-static void handle_client(int client_fd, worker_thread_args_t *args) {
+static long handle_client(int client_fd, worker_thread_args_t *args) {
     char buffer[BUFFER_SIZE];
     ssize_t bytes = read_http_request(client_fd, buffer, sizeof(buffer));
     if (bytes <= 0) {
         close(client_fd);
-        return;
+        return 0;
     }
 
     buffer[bytes] = '\0';
 
     HttpRequest req;
     if (parse_http_request(buffer, &req) != 0) {
-        send_error(client_fd,
+        long sent = send_error(client_fd,
                    "HTTP/1.1 400 Bad Request",
                    "<h1>400 Bad Request</h1>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_400++;
+        sem_post(args->sems->stats);
+        
+        log_request(args, NULL, NULL, NULL, 400, sent);
+        
         close(client_fd);
-        return;
+        return sent;
     }
 
     // directory traversal
     if (strstr(req.path, "..") != NULL) {
-        send_error(client_fd,
+        long sent = send_error(client_fd,
                    "HTTP/1.1 403 Forbidden",
                    "<h1>403 Forbidden</h1>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_403++;
+        sem_post(args->sems->stats);
+        
+        log_request(args, req.method, req.path, req.version, 403, sent);
+        
         close(client_fd);
-        return;
+        return sent;
     }
 
     // apenas GET e HEAD
     if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
-        send_error(client_fd,
+        long sent = send_error(client_fd,
                    "HTTP/1.1 501 Not Implemented",
                    "<h1>501 Not Implemented</h1>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_501++;
+        sem_post(args->sems->stats);
+        
+        log_request(args, req.method, req.path, req.version, 501, sent);
+        
         close(client_fd);
-        return;
+        return sent;
     }
 
     // constrói caminho real a partir da DOCUMENT_ROOT
@@ -62,8 +115,34 @@ static void handle_client(int client_fd, worker_thread_args_t *args) {
     }
 
     int send_body = strcmp(req.method, "HEAD") != 0;
-    send_file(client_fd, fullpath, send_body);
+    
+    // Verificar se o arquivo existe para determinar o status code antes de enviar
+    long sent;
+    if (access(fullpath, F_OK) != 0) {
+        // Arquivo não existe - 404
+        sent = send_file(client_fd, fullpath, send_body);
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_404++;
+        sem_post(args->sems->stats);
+        log_request(args, req.method, req.path, req.version, 404, sent);
+    } else if (access(fullpath, R_OK) != 0) {
+        // Sem permissão - 403
+        sent = send_file(client_fd, fullpath, send_body);
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_403++;
+        sem_post(args->sems->stats);
+        log_request(args, req.method, req.path, req.version, 403, sent);
+    } else {
+        // Arquivo existe e é legível - 200
+        sent = send_file(client_fd, fullpath, send_body);
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_200++;
+        sem_post(args->sems->stats);
+        log_request(args, req.method, req.path, req.version, 200, sent);
+    }
+    
     close(client_fd);
+    return sent;
 }
 
 // função executada por cada thread do pool
@@ -85,8 +164,20 @@ static void* worker_thread(void *arg) {
         sem_post(sems->mutex);
         sem_post(sems->empty);
 
-        // aqui processa o pedido HTTP
-        handle_client(client_fd, args);
+        // Incrementar conexões ativas e total de pedidos
+        sem_wait(sems->stats);
+        shared->stats.active_connections++;
+        shared->stats.total_requests++;
+        sem_post(sems->stats);
+
+        // Processar o pedido HTTP e obter bytes transferidos
+        long bytes = handle_client(client_fd, args);
+
+        // Atualizar bytes transferidos e decrementar conexões ativas
+        sem_wait(sems->stats);
+        shared->stats.bytes_transferred += bytes;
+        shared->stats.active_connections--;
+        sem_post(sems->stats);
     }
 
     return NULL; // nunca chega aqui
@@ -97,12 +188,20 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     int n = config->threads_per_worker;
     if (n <= 0) n = 1;
 
+    // abre ficheiro de log em modo append
+    FILE *log_fp = fopen(config->log_file, "a");
+    if (!log_fp) {
+        perror("fopen log_file");
+        exit(1); // este processo worker morre se não conseguir loggar
+    }
+
     pthread_t threads[n];
 
     worker_thread_args_t args;
     args.shared = shared;
     args.sems   = sems;
     args.config = config;
+    args.log_fp = log_fp;
 
     for (int i = 0; i < n; i++) {
         if (pthread_create(&threads[i], NULL, worker_thread, &args) != 0) {

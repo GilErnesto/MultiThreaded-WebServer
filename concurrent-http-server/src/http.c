@@ -26,7 +26,7 @@ const char* get_mime_type(const char* path) {
 // ------------------------
 //  ERROS HTTP
 // ------------------------
-void send_error(int client_fd, const char* status_line, const char* body) {
+long send_error(int client_fd, const char* status_line, const char* body) {
     char headers[256];
     size_t body_len = strlen(body);
 
@@ -45,8 +45,10 @@ void send_error(int client_fd, const char* status_line, const char* body) {
         "\r\n",
         status_line, body_len, date_header);
 
-    send(client_fd, headers, strlen(headers), 0);
-    send(client_fd, body, body_len, 0);
+    long bytes_sent = 0;
+    bytes_sent += send(client_fd, headers, strlen(headers), 0);
+    bytes_sent += send(client_fd, body, body_len, 0);
+    return bytes_sent;
 }
 
 // ------------------------
@@ -105,47 +107,42 @@ ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
 // ------------------------
 //  SERVE FILE (200 OK)
 // ------------------------
-void send_file(int client_fd, const char* fullpath, int send_body) {
+long send_file(int client_fd, const char* fullpath, int send_body) {
 
     // valida existência
     if (access(fullpath, F_OK) != 0) {
-        send_error(client_fd,
+        return send_error(client_fd,
             "HTTP/1.1 404 Not Found",
             "<h1>404 Not Found</h1>");
-        return;
     }
 
     // valida permissões
     if (access(fullpath, R_OK) != 0) {
-        send_error(client_fd,
+        return send_error(client_fd,
             "HTTP/1.1 403 Forbidden",
             "<h1>403 Forbidden</h1>");
-        return;
     }
 
     FILE* file = fopen(fullpath, "rb");
     if (!file) {
-        send_error(client_fd,
+        return send_error(client_fd,
             "HTTP/1.1 500 Internal Server Error",
             "<h1>500 Internal Server Error</h1>");
-        return;
     }
 
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
-        send_error(client_fd,
+        return send_error(client_fd,
             "HTTP/1.1 500 Internal Server Error",
             "<h1>500 Internal Server Error</h1>");
-        return;
     }
 
     long file_size = ftell(file);
     if (file_size < 0) {
         fclose(file);
-        send_error(client_fd,
+        return send_error(client_fd,
             "HTTP/1.1 500 Internal Server Error",
             "<h1>500 Internal Server Error</h1>");
-        return;
     }
 
     fseek(file, 0, SEEK_SET);
@@ -168,18 +165,19 @@ void send_file(int client_fd, const char* fullpath, int send_body) {
         "\r\n",
         mime, file_size, date_header);
 
-    send(client_fd, headers, strlen(headers), 0);
+    long bytes_sent = send(client_fd, headers, strlen(headers), 0);
 
     // HEAD → sem corpo
     if (!send_body) {
         fclose(file);
-        return;
+        return bytes_sent;
     }
 
     char buf[1024];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), file)) > 0)
-        send(client_fd, buf, n, 0);
+        bytes_sent += send(client_fd, buf, n, 0);
 
     fclose(file);
+    return bytes_sent;
 }

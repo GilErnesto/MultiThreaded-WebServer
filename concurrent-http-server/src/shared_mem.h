@@ -14,8 +14,11 @@ typedef struct {
     long total_requests;
     long bytes_transferred;
     long status_200;
+    long status_400;
+    long status_403;
     long status_404;
     long status_500;
+    long status_501;
     int active_connections;
 } server_stats_t;
 
