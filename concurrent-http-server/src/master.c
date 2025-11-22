@@ -6,9 +6,12 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+
 #include "config.h"
-#include "http.h"      // HttpRequest, BUFFER_SIZE, read_http_request, send_error, send_file, etc.
-#include "worker.h"    // void worker_loop(int listen_fd, server_config_t *config);
+#include "http.h"
+#include "worker.h"
+#include "shared_mem.h"
+#include "semaphores.h"
 
 int main(void) {
     server_config_t config;
@@ -17,7 +20,7 @@ int main(void) {
         exit(1);
     }
 
-    // cria socket TCP IPv4 (listen socket partilhado por todos os workers)
+    // cria socket TCP IPv4 (listen socket do master)
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket failed");
@@ -49,6 +52,23 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
+    // cria memória partilhada
+    shared_data_t *shared = create_shared_memory();
+    if (!shared) {
+        fprintf(stderr, "Erro a criar memória partilhada\n");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    // inicializa semáforos
+    semaphores_t sems;
+    if (init_semaphores(&sems, config.max_queue_size) != 0) {
+        fprintf(stderr, "Erro a criar semáforos\n");
+        destroy_shared_memory(shared);
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
     printf("MASTER: listening on port %d, spawning %d workers...\n",
            config.port, config.num_workers);
 
@@ -58,23 +78,43 @@ int main(void) {
         if (pid < 0) {
             perror("fork failed");
             close(server_fd);
+            destroy_semaphores(&sems);
+            destroy_shared_memory(shared);
             exit(EXIT_FAILURE);
         }
         if (pid == 0) {
             // filho = worker
-            worker_loop(server_fd, &config);
+            worker_loop(shared, &sems, &config);
             // nunca devia sair daqui
             exit(0);
         }
-        // pai continua o ciclo para criar mais workers
+        // pai continua para criar mais workers
     }
 
-    // MASTER: opcionalmente pode fazer wait aos filhos ou ficar num loop
-    // simples à espera de sinais (nesta fase podes só fazer pause)
+    // loop principal do MASTER: aceita e enfileira ligações
     while (1) {
-        pause();
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
+            perror("accept failed (master)");
+            continue;
+        }
+
+        // producer: coloca FD na queue com semáforos
+        sem_wait(sems.empty);
+        sem_wait(sems.mutex);
+
+        int idx = shared->queue.rear;
+        shared->queue.sockets[idx] = client_fd;
+        shared->queue.rear = (shared->queue.rear + 1) % MAX_QUEUE_SIZE;
+        shared->queue.count++;
+
+        sem_post(sems.mutex);
+        sem_post(sems.full);
     }
 
+    // nunca chega aqui em execução normal
+    destroy_semaphores(&sems);
+    destroy_shared_memory(shared);
     close(server_fd);
     return 0;
 }
