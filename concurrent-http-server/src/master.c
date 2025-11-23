@@ -6,6 +6,8 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <time.h>
 
 #include "config.h"
 #include "http.h"
@@ -85,13 +87,38 @@ int main(void) {
         if (pid == 0) {
             // filho = worker
             worker_loop(shared, &sems, &config);
-            // nunca devia sair daqui
             exit(0);
         }
         // pai continua para criar mais workers
     }
 
-    // loop principal do MASTER: aceita e enfileira ligações
+    // PROCESSO DE ESTATÍSTICAS
+    pid_t stats_pid = fork();
+    if (stats_pid == 0) {
+        // FILHO ESPECIAL = PROCESSO DE ESTATÍSTICAS
+        while (1) {
+            sleep(30);
+
+            sem_wait(sems.stats);
+
+            printf("\n===== ESTATÍSTICAS =====\n");
+            printf("Total requests:      %ld\n", shared->stats.total_requests);
+            printf("Bytes transferred:   %ld\n", shared->stats.bytes_transferred);
+            printf("Status 200:          %ld\n", shared->stats.status_200);
+            printf("Status 400:          %ld\n", shared->stats.status_400);
+            printf("Status 403:          %ld\n", shared->stats.status_403);
+            printf("Status 404:          %ld\n", shared->stats.status_404);
+            printf("Status 500:          %ld\n", shared->stats.status_500);
+            printf("Status 501:          %ld\n", shared->stats.status_501);
+            printf("Active connections:  %ld\n", shared->stats.active_connections);
+            printf("========================\n");
+
+            sem_post(sems.stats);
+        }
+        exit(0);
+    }
+
+    // LOOP PRINCIPAL DO MASTER: ACCEPT + PRODUTOR
     while (1) {
         int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd < 0) {
@@ -112,7 +139,6 @@ int main(void) {
         sem_post(sems.full);
     }
 
-    // nunca chega aqui em execução normal
     destroy_semaphores(&sems);
     destroy_shared_memory(shared);
     close(server_fd);
