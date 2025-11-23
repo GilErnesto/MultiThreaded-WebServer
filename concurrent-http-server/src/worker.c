@@ -7,6 +7,7 @@
 
 #include "worker.h"
 #include "http.h"
+#include "cache.h"
 
 // argumentos comuns a todas as threads do processo worker
 typedef struct {
@@ -14,6 +15,7 @@ typedef struct {
     semaphores_t    *sems;
     server_config_t *config;
     FILE            *log_fp;
+    cache_t         *cache;
 } worker_thread_args_t;
 
 static void log_request(worker_thread_args_t *args,
@@ -195,14 +197,24 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
         exit(1); // este processo worker morre se não conseguir loggar
     }
 
-    pthread_t threads[n];
+    // inicializa cache deste processo worker
+    static cache_t cache;
+    size_t max_bytes = (size_t)config->cache_size_mb * 1024 * 1024;
+    if (max_bytes == 0) max_bytes = 1 * 1024 * 1024; // mínimo 1MB
+    cache_init(&cache, max_bytes);
 
+    // ligamos o módulo HTTP a esta cache
+    http_set_cache(&cache);
+
+    
     worker_thread_args_t args;
     args.shared = shared;
     args.sems   = sems;
     args.config = config;
     args.log_fp = log_fp;
-
+    args.cache  = &cache;
+    
+    pthread_t threads[n];
     for (int i = 0; i < n; i++) {
         if (pthread_create(&threads[i], NULL, worker_thread, &args) != 0) {
             perror("pthread_create");
@@ -214,4 +226,8 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     for (;;) {
         pause();
     }
+    // (em prática nunca chega aqui; se algum dia fizer shutdown limpo:
+    // cache_destroy(&cache);
+    // fclose(log_fp); )
+
 }

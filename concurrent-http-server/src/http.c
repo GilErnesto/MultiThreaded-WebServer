@@ -6,9 +6,18 @@
 #include <sys/socket.h>
 #include <time.h>
 
-// ------------------------
+#include "http.h"
+#include "cache.h"
+
+static cache_t *g_cache = NULL;
+
+void http_set_cache(cache_t *cache) {
+    g_cache = cache;
+}
+
+
 //  MIME TYPES
-// ------------------------
+
 const char* get_mime_type(const char* path) {
     const char* ext = strrchr(path, '.');
     if (!ext) return "application/octet-stream";
@@ -23,9 +32,9 @@ const char* get_mime_type(const char* path) {
     return "application/octet-stream";
 }
 
-// ------------------------
+
 //  ERROS HTTP
-// ------------------------
+
 long send_error(int client_fd, const char* status_line, const char* body) {
     char headers[256];
     size_t body_len = strlen(body);
@@ -51,9 +60,9 @@ long send_error(int client_fd, const char* status_line, const char* body) {
     return bytes_sent;
 }
 
-// ------------------------
+
 //  PARSE HTTP REQUEST LINE
-// ------------------------
+
 int parse_http_request(const char *buffer, HttpRequest *req) {
     char local[BUFFER_SIZE];
     strncpy(local, buffer, sizeof(local) - 1);
@@ -83,9 +92,9 @@ int parse_http_request(const char *buffer, HttpRequest *req) {
     return 0;
 }
 
-// ------------------------
+
 //  READ HTTP REQUEST
-// ------------------------
+
 ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
     size_t total = 0;
 
@@ -104,48 +113,110 @@ ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
     return (ssize_t)total;
 }
 
-// ------------------------
-//  SERVE FILE (200 OK)
-// ------------------------
 long send_file(int client_fd, const char* fullpath, int send_body) {
+    const char *cached_data = NULL;
+    size_t cached_size = 0;
+    long total_sent = 0;
 
-    // valida existência
-    if (access(fullpath, F_OK) != 0) {
-        return send_error(client_fd,
-            "HTTP/1.1 404 Not Found",
-            "<h1>404 Not Found</h1>");
+    // 1) tenta cache
+    if (g_cache && cache_get(g_cache, fullpath, &cached_data, &cached_size)) {
+        // cache hit → envia a partir da memória
+        char date_header[128];
+        time_t now = time(NULL);
+        struct tm *gmt = gmtime(&now);
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+
+        const char* mime = get_mime_type(fullpath);
+
+        char headers[512];
+        int hlen = snprintf(headers, sizeof(headers),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Server: ConcurrentHTTP/1.0\r\n"
+            "Date: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            mime, cached_size, date_header);
+
+        if (hlen < 0) return 0;
+
+        send(client_fd, headers, hlen, 0);
+        total_sent += hlen;
+
+        if (send_body) {
+            send(client_fd, cached_data, cached_size, 0);
+            total_sent += (long)cached_size;
+        }
+
+        return total_sent;
     }
 
-    // valida permissões
+    // 2) cache miss → valida existência e permissões
+    if (access(fullpath, F_OK) != 0) {
+        return send_error(client_fd,
+                          "HTTP/1.1 404 Not Found",
+                          "<h1>404 Not Found</h1>");
+    }
+
     if (access(fullpath, R_OK) != 0) {
         return send_error(client_fd,
-            "HTTP/1.1 403 Forbidden",
-            "<h1>403 Forbidden</h1>");
+                          "HTTP/1.1 403 Forbidden",
+                          "<h1>403 Forbidden</h1>");
     }
 
     FILE* file = fopen(fullpath, "rb");
     if (!file) {
         return send_error(client_fd,
-            "HTTP/1.1 500 Internal Server Error",
-            "<h1>500 Internal Server Error</h1>");
+                          "HTTP/1.1 500 Internal Server Error",
+                          "<h1>500 Internal Server Error</h1>");
     }
 
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
         return send_error(client_fd,
-            "HTTP/1.1 500 Internal Server Error",
-            "<h1>500 Internal Server Error</h1>");
+                          "HTTP/1.1 500 Internal Server Error",
+                          "<h1>500 Internal Server Error</h1>");
     }
 
     long file_size = ftell(file);
     if (file_size < 0) {
         fclose(file);
         return send_error(client_fd,
-            "HTTP/1.1 500 Internal Server Error",
-            "<h1>500 Internal Server Error</h1>");
+                          "HTTP/1.1 500 Internal Server Error",
+                          "<h1>500 Internal Server Error</h1>");
     }
 
     fseek(file, 0, SEEK_SET);
+
+    // lê ficheiro para memória (para poder meter na cache)
+    char *buf = malloc(file_size);
+    if (!buf) {
+        fclose(file);
+        return send_error(client_fd,
+                          "HTTP/1.1 500 Internal Server Error",
+                          "<h1>500 Internal Server Error</h1>");
+    }
+
+    size_t read_total = 0;
+    while (read_total < (size_t)file_size) {
+        size_t n = fread(buf + read_total, 1, (size_t)file_size - read_total, file);
+        if (n == 0) break;
+        read_total += n;
+    }
+    fclose(file);
+
+    if (read_total != (size_t)file_size) {
+        free(buf);
+        return send_error(client_fd,
+                          "HTTP/1.1 500 Internal Server Error",
+                          "<h1>500 Internal Server Error</h1>");
+    }
+
+    // mete na cache se tivermos g_cache
+    if (g_cache) {
+        cache_put(g_cache, fullpath, buf, (size_t)file_size);
+    }
 
     char date_header[128];
     time_t now = time(NULL);
@@ -155,7 +226,7 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
     const char* mime = get_mime_type(fullpath);
 
     char headers[512];
-    snprintf(headers, sizeof(headers),
+    int hlen = snprintf(headers, sizeof(headers),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %ld\r\n"
@@ -165,19 +236,19 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
         "\r\n",
         mime, file_size, date_header);
 
-    long bytes_sent = send(client_fd, headers, strlen(headers), 0);
-
-    // HEAD → sem corpo
-    if (!send_body) {
-        fclose(file);
-        return bytes_sent;
+    if (hlen < 0) {
+        free(buf);
+        return 0;
     }
 
-    char buf[1024];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), file)) > 0)
-        bytes_sent += send(client_fd, buf, n, 0);
+    send(client_fd, headers, hlen, 0);
+    total_sent += hlen;
 
-    fclose(file);
-    return bytes_sent;
+    if (send_body) {
+        send(client_fd, buf, (size_t)file_size, 0);
+        total_sent += file_size;
+    }
+
+    free(buf);
+    return total_sent;
 }
