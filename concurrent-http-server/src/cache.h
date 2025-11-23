@@ -1,6 +1,7 @@
 #ifndef CACHE_H
 #define CACHE_H
 
+#define _GNU_SOURCE
 #include <stddef.h>
 #include <pthread.h>
 
@@ -16,19 +17,18 @@ typedef struct {
 
 typedef struct {
     cache_entry_t entries[CACHE_MAX_ENTRIES];
-    size_t        max_bytes;
-    size_t        used_bytes;
-    unsigned long counter;      // para LRU simples
+    size_t max_bytes;
+    size_t used_bytes;
+    unsigned long counter;
     pthread_rwlock_t lock;
 } cache_t;
 
 void cache_init(cache_t *cache, size_t max_bytes);
 void cache_destroy(cache_t *cache);
 
-// devolve 1 em hit, 0 em miss
+// retorna 1 = HIT; 0 = MISS
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size);
 
-// tenta inserir (ignora ficheiros maiores que max_bytes)
 void cache_put(cache_t *cache, const char *path, const char *data, size_t size);
 
 #endif

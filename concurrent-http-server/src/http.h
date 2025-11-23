@@ -18,6 +18,6 @@ long send_error(int client_fd, const char* status_line, const char* body);
 int parse_http_request(const char *buffer, HttpRequest *req);
 ssize_t read_http_request(int client_fd, char *buffer, size_t size);
 long send_file(int client_fd, const char* fullpath, int send_body);
-void http_set_cache(cache_t *cache);
+long send_file_with_cache(int client_fd, const char* fullpath, int send_body, cache_t *cache);
 
 #endif

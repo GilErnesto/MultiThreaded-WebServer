@@ -12,10 +12,10 @@
 #include "config.h"
 #include "http.h"
 #include "worker.h"
-#include "shared_mem.h"
-#include "semaphores.h"
+#include "stats.h"
+#include "master.h"
 
-int main(void) {
+int master_main(void) {
     server_config_t config;
     if (load_config("server.conf", &config) != 0) {
         printf("Erro a ler server.conf\n");
@@ -110,7 +110,7 @@ int main(void) {
             printf("Status 404:          %ld\n", shared->stats.status_404);
             printf("Status 500:          %ld\n", shared->stats.status_500);
             printf("Status 501:          %ld\n", shared->stats.status_501);
-            printf("Active connections:  %ld\n", shared->stats.active_connections);
+            printf("Active connections:  %d\n", shared->stats.active_connections);
             printf("========================\n");
 
             sem_post(sems.stats);

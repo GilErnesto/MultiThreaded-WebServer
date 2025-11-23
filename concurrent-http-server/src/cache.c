@@ -1,8 +1,8 @@
 #include "cache.h"
-
 #include <string.h>
 #include <stdlib.h>
 
+// Procurar entrada por path
 static int find_entry(cache_t *cache, const char *path) {
     for (int i = 0; i < CACHE_MAX_ENTRIES; i++) {
         if (cache->entries[i].in_use &&
@@ -13,12 +13,11 @@ static int find_entry(cache_t *cache, const char *path) {
     return -1;
 }
 
+// LRU eviction
 static int evict_victim(cache_t *cache, size_t needed) {
-    // se houver espaço suficiente, não é preciso evict já
     if (cache->used_bytes + needed <= cache->max_bytes)
         return -1;
 
-    // escolhe LRU
     int victim = -1;
     unsigned long best = (unsigned long)-1;
 
@@ -53,75 +52,59 @@ void cache_destroy(cache_t *cache) {
     for (int i = 0; i < CACHE_MAX_ENTRIES; i++) {
         if (cache->entries[i].in_use) {
             free(cache->entries[i].data);
-            cache->entries[i].data = NULL;
-            cache->entries[i].size = 0;
-            cache->entries[i].in_use = 0;
         }
     }
-    cache->used_bytes = 0;
     pthread_rwlock_unlock(&cache->lock);
     pthread_rwlock_destroy(&cache->lock);
 }
 
+// HIT = devolve 1; MISS = devolve 0
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size) {
-    int hit = 0;
-
     pthread_rwlock_rdlock(&cache->lock);
 
     int idx = find_entry(cache, path);
-    if (idx >= 0) {
-        cache_entry_t *e = &cache->entries[idx];
-        *data = e->data;
-        *size = e->size;
-        hit = 1;
+    if (idx < 0) {
+        pthread_rwlock_unlock(&cache->lock);
+        return 0; // miss
     }
+
+    cache_entry_t *e = &cache->entries[idx];
+    *data = e->data;
+    *size = e->size;
 
     pthread_rwlock_unlock(&cache->lock);
 
-    if (hit) {
-        // atualizar last_used com lock de escrita
-        pthread_rwlock_wrlock(&cache->lock);
-        int idx2 = find_entry(cache, path);
-        if (idx2 >= 0) {
-            cache->counter++;
-            cache->entries[idx2].last_used = cache->counter;
-        }
-        pthread_rwlock_unlock(&cache->lock);
-    }
+    pthread_rwlock_wrlock(&cache->lock);
+    cache->counter++;
+    cache->entries[idx].last_used = cache->counter;
+    pthread_rwlock_unlock(&cache->lock);
 
-    return hit;
+    return 1;
 }
 
 void cache_put(cache_t *cache, const char *path, const char *data, size_t size) {
-    if (size == 0) return;
-    if (size > cache->max_bytes) return; // ficheiro demasiado grande para a cache
+    if (size > cache->max_bytes) return;
 
     pthread_rwlock_wrlock(&cache->lock);
 
-    // se já existe, substitui
     int idx = find_entry(cache, path);
     if (idx >= 0) {
         cache_entry_t *e = &cache->entries[idx];
         cache->used_bytes -= e->size;
         free(e->data);
-        e->data = NULL;
-        e->size = 0;
         e->in_use = 0;
     }
 
-    // garante espaço (pode fazer evict múltiplos)
     while (cache->used_bytes + size > cache->max_bytes) {
         if (evict_victim(cache, size) < 0)
             break;
     }
 
     if (cache->used_bytes + size > cache->max_bytes) {
-        // mesmo após evict não há espaço → desiste
         pthread_rwlock_unlock(&cache->lock);
         return;
     }
 
-    // arranja slot livre
     int free_idx = -1;
     for (int i = 0; i < CACHE_MAX_ENTRIES; i++) {
         if (!cache->entries[i].in_use) {
@@ -129,8 +112,8 @@ void cache_put(cache_t *cache, const char *path, const char *data, size_t size) 
             break;
         }
     }
+
     if (free_idx < 0) {
-        // sem slots → tenta evict um e usar
         free_idx = evict_victim(cache, size);
         if (free_idx < 0) {
             pthread_rwlock_unlock(&cache->lock);
@@ -147,7 +130,6 @@ void cache_put(cache_t *cache, const char *path, const char *data, size_t size) 
 
     memcpy(e->data, data, size);
     strncpy(e->path, path, sizeof(e->path) - 1);
-    e->path[sizeof(e->path) - 1] = '\0';
     e->size = size;
     cache->used_bytes += size;
     cache->counter++;

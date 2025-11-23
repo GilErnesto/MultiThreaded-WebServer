@@ -6,17 +6,9 @@
 #include <sys/socket.h>
 #include <time.h>
 
-#include "http.h"
-#include "cache.h"
-
-static cache_t *g_cache = NULL;
-
-void http_set_cache(cache_t *cache) {
-    g_cache = cache;
-}
-
-
+// ------------------------
 //  MIME TYPES
+// ------------------------
 
 const char* get_mime_type(const char* path) {
     const char* ext = strrchr(path, '.');
@@ -114,45 +106,7 @@ ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
 }
 
 long send_file(int client_fd, const char* fullpath, int send_body) {
-    const char *cached_data = NULL;
-    size_t cached_size = 0;
-    long total_sent = 0;
-
-    // 1) tenta cache
-    if (g_cache && cache_get(g_cache, fullpath, &cached_data, &cached_size)) {
-        // cache hit → envia a partir da memória
-        char date_header[128];
-        time_t now = time(NULL);
-        struct tm *gmt = gmtime(&now);
-        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
-
-        const char* mime = get_mime_type(fullpath);
-
-        char headers[512];
-        int hlen = snprintf(headers, sizeof(headers),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: %s\r\n"
-            "Content-Length: %zu\r\n"
-            "Server: ConcurrentHTTP/1.0\r\n"
-            "Date: %s\r\n"
-            "Connection: close\r\n"
-            "\r\n",
-            mime, cached_size, date_header);
-
-        if (hlen < 0) return 0;
-
-        send(client_fd, headers, hlen, 0);
-        total_sent += hlen;
-
-        if (send_body) {
-            send(client_fd, cached_data, cached_size, 0);
-            total_sent += (long)cached_size;
-        }
-
-        return total_sent;
-    }
-
-    // 2) cache miss → valida existência e permissões
+    // valida existência e permissões
     if (access(fullpath, F_OK) != 0) {
         return send_error(client_fd,
                           "HTTP/1.1 404 Not Found",
@@ -213,17 +167,13 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
                           "<h1>500 Internal Server Error</h1>");
     }
 
-    // mete na cache se tivermos g_cache
-    if (g_cache) {
-        cache_put(g_cache, fullpath, buf, (size_t)file_size);
-    }
-
     char date_header[128];
     time_t now = time(NULL);
     struct tm *gmt = gmtime(&now);
     strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
 
     const char* mime = get_mime_type(fullpath);
+    long total_sent = 0;
 
     char headers[512];
     int hlen = snprintf(headers, sizeof(headers),
@@ -251,4 +201,70 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
 
     free(buf);
     return total_sent;
+}
+
+// ------------------------
+//  SERVE FILE WITH CACHE
+// ------------------------
+long send_file_with_cache(int client_fd, const char* fullpath, int send_body, cache_t *cache) {
+    const char *cached_data = NULL;
+    size_t cached_size = 0;
+    long total_sent = 0;
+
+    // 1) Tentar cache primeiro
+    if (cache && cache_get(cache, fullpath, &cached_data, &cached_size)) {
+        // Cache hit → enviar a partir da memória
+        char date_header[128];
+        time_t now = time(NULL);
+        struct tm *gmt = gmtime(&now);
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+
+        const char* mime = get_mime_type(fullpath);
+
+        char headers[512];
+        int hlen = snprintf(headers, sizeof(headers),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Server: ConcurrentHTTP/1.0\r\n"
+            "Date: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            mime, cached_size, date_header);
+
+        if (hlen < 0) return 0;
+
+        send(client_fd, headers, hlen, 0);
+        total_sent += hlen;
+
+        if (send_body) {
+            send(client_fd, cached_data, cached_size, 0);
+            total_sent += (long)cached_size;
+        }
+
+        return total_sent;
+    }
+
+    // 2) Cache miss → usar send_file normal e adicionar à cache
+    long bytes_sent = send_file(client_fd, fullpath, send_body);
+    
+    // 3) Se foi sucesso (arquivo existe), adicionar à cache
+    if (bytes_sent > 0 && cache && access(fullpath, F_OK) == 0 && access(fullpath, R_OK) == 0) {
+        FILE* file = fopen(fullpath, "rb");
+        if (file) {
+            fseek(file, 0, SEEK_END);
+            long file_size = ftell(file);
+            if (file_size > 0 && file_size < 1024*1024) { // Só cachear ficheiros < 1MB
+                fseek(file, 0, SEEK_SET);
+                char *file_data = malloc(file_size);
+                if (file_data && fread(file_data, 1, file_size, file) == (size_t)file_size) {
+                    cache_put(cache, fullpath, file_data, file_size);
+                }
+                free(file_data);
+            }
+            fclose(file);
+        }
+    }
+    
+    return bytes_sent;
 }
