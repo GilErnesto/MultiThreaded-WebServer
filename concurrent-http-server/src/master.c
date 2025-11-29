@@ -85,12 +85,15 @@ int master_main(void) {
             exit(EXIT_FAILURE);
         }
         if (pid == 0) {
-            // filho = worker
-            worker_loop(shared, &sems, &config);
+            // filho = worker - passa o server_fd para fazer accept()
+            worker_loop(shared, &sems, &config, server_fd);
             exit(0);
         }
         // pai continua para criar mais workers
     }
+    
+    // Master não precisa do server_fd
+    close(server_fd);
 
     // PROCESSO DE ESTATÍSTICAS
     pid_t stats_pid = fork();
@@ -118,29 +121,12 @@ int master_main(void) {
         exit(0);
     }
 
-    // LOOP PRINCIPAL DO MASTER: ACCEPT + PRODUTOR
+    // LOOP PRINCIPAL DO MASTER: espera por filhos
     while (1) {
-        int client_fd = accept(server_fd, NULL, NULL);
-        if (client_fd < 0) {
-            perror("accept failed (master)");
-            continue;
-        }
-
-        // producer: coloca FD na queue com semáforos
-        sem_wait(sems.empty);
-        sem_wait(sems.mutex);
-
-        int idx = shared->queue.rear;
-        shared->queue.sockets[idx] = client_fd;
-        shared->queue.rear = (shared->queue.rear + 1) % MAX_QUEUE_SIZE;
-        shared->queue.count++;
-
-        sem_post(sems.mutex);
-        sem_post(sems.full);
+        pause();
     }
 
     destroy_semaphores(&sems);
     destroy_shared_memory(shared);
-    close(server_fd);
     return 0;
 }

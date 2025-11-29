@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/socket.h>
 
 // Estrutura de argumentos para threads
 typedef struct {
@@ -15,6 +16,7 @@ typedef struct {
     server_config_t *config;
     logger_t        *logger;
     cache_t         *cache;
+    int             server_fd;
 } thread_args_t;
 
 // Declaração forward das funções
@@ -24,7 +26,8 @@ static long handle_client(int client_fd, thread_args_t *args);
 void thread_pool_start(shared_data_t *shared, 
                       semaphores_t *sems, 
                       server_config_t *config, 
-                      logger_t *logger) 
+                      logger_t *logger,
+                      int server_fd) 
 {
     int num_threads = config->threads_per_worker;
     if (num_threads <= 0) num_threads = 1;
@@ -47,6 +50,7 @@ void thread_pool_start(shared_data_t *shared,
     args.config = config;
     args.logger = logger;
     args.cache = cache;
+    args.server_fd = server_fd;
 
     // Criar array de threads
     pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
@@ -80,19 +84,15 @@ static void* worker_thread(void *arg) {
     thread_args_t *args = (thread_args_t*)arg;
     shared_data_t *shared = args->shared;
     semaphores_t  *sems   = args->sems;
+    int server_fd = args->server_fd;
 
     for (;;) {
-        // Consumidor: espera por trabalho na queue
-        sem_wait(sems->full);
-        sem_wait(sems->mutex);
-
-        int idx = shared->queue.front;
-        int client_fd = shared->queue.sockets[idx];
-        shared->queue.front = (shared->queue.front + 1) % MAX_QUEUE_SIZE;
-        shared->queue.count--;
-
-        sem_post(sems->mutex);
-        sem_post(sems->empty);
+        // Cada thread faz accept() diretamente
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
+            perror("accept failed (worker thread)");
+            continue;
+        }
 
         // Incrementar conexões ativas e total de pedidos
         sem_wait(sems->stats);

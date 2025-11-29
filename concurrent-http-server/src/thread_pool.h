@@ -9,6 +9,7 @@
 void thread_pool_start(shared_data_t *shared, 
                       semaphores_t *sems, 
                       server_config_t *config, 
-                      logger_t *logger);
+                      logger_t *logger,
+                      int server_fd);
 
 #endif

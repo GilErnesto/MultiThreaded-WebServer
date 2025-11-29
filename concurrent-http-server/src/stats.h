@@ -46,6 +46,7 @@ typedef struct {
 } semaphores_t;
 
 int init_semaphores(semaphores_t *s, int max_queue_size);
+int reopen_semaphores(semaphores_t *s);
 void destroy_semaphores(semaphores_t *s);
 
 #endif
