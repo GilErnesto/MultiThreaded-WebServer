@@ -156,6 +156,77 @@ static long handle_client(int client_fd, thread_args_t *args) {
         return sent;
     }
 
+    // Endpoints especiais
+    // Endpoint /stats - retorna estatísticas do servidor
+    if (strcmp(req.path, "/stats") == 0 && strcmp(req.method, "GET") == 0) {
+        sem_wait(args->sems->stats);
+        char stats_body[2048];
+        snprintf(stats_body, sizeof(stats_body),
+            "<!DOCTYPE html>\n"
+            "<html><head><title>Server Statistics</title></head>\n"
+            "<body>\n"
+            "<h1>Server Statistics</h1>\n"
+            "<table border='1'>\n"
+            "<tr><td>Total Requests</td><td>%ld</td></tr>\n"
+            "<tr><td>Bytes Transferred</td><td>%ld</td></tr>\n"
+            "<tr><td>Active Connections</td><td>%d</td></tr>\n"
+            "<tr><td>Status 200 (OK)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 400 (Bad Request)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 403 (Forbidden)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 404 (Not Found)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 500 (Internal Error)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 501 (Not Implemented)</td><td>%ld</td></tr>\n"
+            "</table>\n"
+            "</body></html>\n",
+            args->shared->stats.total_requests,
+            args->shared->stats.bytes_transferred,
+            args->shared->stats.active_connections,
+            args->shared->stats.status_200,
+            args->shared->stats.status_400,
+            args->shared->stats.status_403,
+            args->shared->stats.status_404,
+            args->shared->stats.status_500,
+            args->shared->stats.status_501
+        );
+        sem_post(args->sems->stats);
+        
+        char response[4096];
+        int resp_len = snprintf(response, sizeof(response),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "%s",
+            strlen(stats_body), stats_body
+        );
+        
+        long sent = send(client_fd, response, resp_len, 0);
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_200++;
+        sem_post(args->sems->stats);
+        
+        log_request(args->logger, req.method, req.path, req.version, 200, sent);
+        close(client_fd);
+        return sent;
+    }
+    
+    // Endpoint /cause500 - para testes (gera erro 500 intencionalmente)
+    if (strcmp(req.path, "/cause500") == 0) {
+        long sent = send_error(client_fd,
+                   "HTTP/1.1 500 Internal Server Error",
+                   "<h1>500 Internal Server Error</h1><p>This error was intentionally triggered for testing.</p>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_500++;
+        sem_post(args->sems->stats);
+        
+        log_request(args->logger, req.method, req.path, req.version, 500, sent);
+        close(client_fd);
+        return sent;
+    }
+
     // apenas GET e HEAD
     if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
         long sent = send_error(client_fd,
