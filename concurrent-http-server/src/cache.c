@@ -60,25 +60,23 @@ void cache_destroy(cache_t *cache) {
 
 // HIT = devolve 1; MISS = devolve 0
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size) {
-    pthread_rwlock_rdlock(&cache->lock);
-
+    pthread_rwlock_wrlock(&cache->lock);  // ← WRITE lock desde início
+    
     int idx = find_entry(cache, path);
     if (idx < 0) {
         pthread_rwlock_unlock(&cache->lock);
-        return 0; // miss
+        return 0;
     }
-
+    
     cache_entry_t *e = &cache->entries[idx];
     *data = e->data;
     *size = e->size;
-
-    pthread_rwlock_unlock(&cache->lock);
-
-    pthread_rwlock_wrlock(&cache->lock);
+    
+    // Atualiza LRU enquanto tem o lock
     cache->counter++;
-    cache->entries[idx].last_used = cache->counter;
+    e->last_used = cache->counter;
+    
     pthread_rwlock_unlock(&cache->lock);
-
     return 1;
 }
 

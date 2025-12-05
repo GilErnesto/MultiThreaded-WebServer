@@ -23,34 +23,46 @@ NC='\033[0m'
 
 # Função global para fazer requests continuamente (usada por background jobs)
 make_requests_worker() {
+    # Desabilitar exit-on-error para esta função
+    set +e
+    
     local end_time=$1
     local tmp_requests=$2
     local tmp_errors=$3
     local local_requests=0
     local local_errors=0
     
-    while [ $(date +%s) -lt $end_time ]; do
-            if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/index.html" 2>/dev/null | grep -q "^200$"; then
-                echo -n "."
-                ((local_requests++))
-            else
-                echo -n "E"
-                ((local_requests++))
-                ((local_errors++))
-            fi
-            sleep 0.1
-        done
+    # Validar end_time
+    if [ -z "$end_time" ] || [ "$end_time" -le 0 ]; then
+        echo "ERROR: Invalid end_time in worker" >&2
+        return 1
+    fi
     
-    # Escrever contadores para ficheiros com lock
-    (
-            flock 200
-            echo $(($(cat "$tmp_requests") + local_requests)) > "$tmp_requests"
-        ) 200>"$tmp_requests.lock"
-        
-        (
-            flock 201
-            echo $(($(cat "$tmp_errors") + local_errors)) > "$tmp_errors"
-        ) 201>"$tmp_errors.lock"
+    local current_time=$(date +%s)
+    
+    # Loop até end_time
+    while [ $current_time -lt $end_time ]; do
+        if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/index.html" 2>/dev/null | grep -q "^200$"; then
+            echo -n "."
+            ((local_requests++))
+        else
+            echo -n "E"
+            ((local_requests++))
+            ((local_errors++))
+        fi
+        sleep 0.1
+        # Atualizar tempo atual
+        current_time=$(date +%s)
+    done
+    
+    # Escrever contadores para ficheiros (append para evitar condições de corrida)
+    for i in $(seq 1 $local_requests); do
+        echo "1" >> "$tmp_requests"
+    done
+    
+    for i in $(seq 1 $local_errors); do
+        echo "1" >> "$tmp_errors"
+    done
 }
 
 test_continuous_load() {
@@ -67,11 +79,11 @@ test_continuous_load() {
     echo "Início: $(date)"
     echo "A executar carga contínua até: $(date -d @${end_time})"
     
-    # Criar ficheiros temporários para contadores
+    # Criar ficheiros temporários para contadores (vazios, vamos usar append)
     local tmp_requests=$(mktemp)
     local tmp_errors=$(mktemp)
-    echo 0 > "$tmp_requests"
-    echo 0 > "$tmp_errors"
+    > "$tmp_requests"
+    > "$tmp_errors"
     
     # Lançar múltiplos workers
     local num_workers=10
@@ -84,11 +96,11 @@ test_continuous_load() {
     # Esperar que o tempo passe
     wait
     
-    # Ler totais
-    request_count=$(cat "$tmp_requests")
-    error_count=$(cat "$tmp_errors")
+    # Ler totais (contar linhas)
+    request_count=$(wc -l < "$tmp_requests" 2>/dev/null | tr -d ' ' || echo "0")
+    error_count=$(wc -l < "$tmp_errors" 2>/dev/null | tr -d ' ' || echo "0")
     
-    rm -f "$tmp_requests" "$tmp_errors" "$tmp_requests.lock" "$tmp_errors.lock"
+    rm -f "$tmp_requests" "$tmp_errors"
     
     echo ""
     echo "Fim: $(date)"
@@ -256,22 +268,22 @@ test_no_zombies() {
         sleep 1
     done
     
-    # Verificar processos zombie
+    # Verificar processos zombie relacionados com o servidor
     local zombies
-    zombies=$(ps aux | grep -c '<defunct>' || echo "0")
+    local zombie_procs
+    zombie_procs=$(ps aux | grep '<defunct>' | grep -E 'server|worker|master' | grep -v -E 'grep|forkserver' 2>/dev/null || true)
     
-    # Descontar o próprio grep
-    if [ "$zombies" -gt 1 ]; then
-        zombies=$((zombies - 1))
-    else
+    if [ -z "$zombie_procs" ]; then
         zombies=0
+    else
+        zombies=$(echo "$zombie_procs" | wc -l | tr -d ' ')
     fi
     
     if [ "$zombies" -eq 0 ]; then
         echo -e "${GREEN}[OK]${NC} Nenhum processo zombie detetado"
     else
-        echo -e "${RED}[FAIL]${NC} ${zombies} processos zombie detetados"
-        ps aux | grep '<defunct>' || true
+        echo -e "${RED}[FAIL]${NC} ${zombies} processos zombie do servidor detetados"
+        ps aux | grep '<defunct>' | grep -E 'server|worker|master' | grep -v -E 'grep|forkserver' || true
         FAIL=1
     fi
 }
@@ -290,6 +302,15 @@ else
     if [ -t 0 ]; then  # Se estamos num terminal interativo
         read -p "Executar teste de 5 minutos? (s/N): " -n 1 -r
         echo
+        if [[ $REPLY =~ ^[Ss]$ ]]; then
+            test_continuous_load
+        else
+            echo -e "${YELLOW}[SKIP]${NC} Teste de carga contínua"
+        fi
+    else
+        # Não-interativo: tentar ler do stdin
+        echo "Executar teste de 5 minutos? (s/N): "
+        read -r REPLY
         if [[ $REPLY =~ ^[Ss]$ ]]; then
             test_continuous_load
         else

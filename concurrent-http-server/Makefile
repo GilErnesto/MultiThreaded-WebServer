@@ -63,7 +63,7 @@ run: all
 .PHONY: all clean run test testFull tsan
 
 # Testes normais (essenciais)
-test: $(TARGET) $(TEST_CONCURRENT)
+testSimple: $(TARGET) $(TEST_CONCURRENT)
 	@$(TEST_DIR)/run_with_server.sh ./$(TARGET) normal
 
 # Testes completos (incluindo sync e stress)

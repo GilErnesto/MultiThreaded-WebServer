@@ -47,7 +47,9 @@ void log_request(logger_t *logger,
     
     char timebuf[64];
     time_t now = time(NULL);
-    struct tm *lt = localtime(&now);
+    struct tm tm_buf;
+    struct tm *lt = localtime_r(&now, &tm_buf);
+    if (!lt) return;  // Erro ao converter tempo
     strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S %z", lt);
 
     // Formato aproximado de Apache Combined Log:

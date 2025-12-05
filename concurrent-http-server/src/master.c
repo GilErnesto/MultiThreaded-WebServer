@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,12 +10,25 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <errno.h>
 
 #include "config.h"
 #include "http.h"
 #include "worker.h"
 #include "stats.h"
 #include "master.h"
+
+static void sigchld_handler(int sig) {
+    (void)sig;
+    int saved_errno = errno;
+
+    // Recolhe todos os filhos terminados
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        // nada
+    }
+
+    errno = saved_errno;
+}
 
 int master_main(void) {
     server_config_t config;
@@ -50,6 +65,19 @@ int master_main(void) {
 
     if (listen(server_fd, 128) < 0) {
         perror("listen failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Registar handler para SIGCHLD
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+
+    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+        perror("sigaction SIGCHLD");
         close(server_fd);
         exit(EXIT_FAILURE);
     }

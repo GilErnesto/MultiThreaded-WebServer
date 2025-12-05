@@ -33,8 +33,13 @@ long send_error(int client_fd, const char* status_line, const char* body) {
 
     char date_header[128];
     time_t now = time(NULL);
-    struct tm *gmt = gmtime(&now);
-    strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    struct tm tm_buf;
+    struct tm *gmt = gmtime_r(&now, &tm_buf);
+    if (!gmt) {
+        strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+    } else {
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    }
 
     snprintf(headers, sizeof(headers),
         "%s\r\n"
@@ -169,8 +174,13 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
 
     char date_header[128];
     time_t now = time(NULL);
-    struct tm *gmt = gmtime(&now);
-    strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    struct tm tm_buf;
+    struct tm *gmt = gmtime_r(&now, &tm_buf);
+    if (!gmt) {
+        strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+    } else {
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    }
 
     const char* mime = get_mime_type(fullpath);
     long total_sent = 0;
@@ -216,8 +226,13 @@ long send_file_with_cache(int client_fd, const char* fullpath, int send_body, ca
         // Cache hit → enviar a partir da memória
         char date_header[128];
         time_t now = time(NULL);
-        struct tm *gmt = gmtime(&now);
-        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+        struct tm tm_buf;
+        struct tm *gmt = gmtime_r(&now, &tm_buf);
+        if (!gmt) {
+            strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+        } else {
+            strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+        }
 
         const char* mime = get_mime_type(fullpath);
 
