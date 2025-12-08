@@ -1,9 +1,4 @@
 #!/bin/bash
-# Testes de Concorrência (Requisitos 13-16)
-# - Apache Bench com carga alta
-# - Verificar conexões não perdidas
-# - Múltiplos clientes em paralelo (curl/wget)
-# - Verificar precisão das estatísticas
 
 set -euo pipefail
 
@@ -44,7 +39,6 @@ test_apache_bench() {
             FAIL=1
         fi
         
-        # Mostrar algumas estatísticas
         grep "Requests per second:" "$output" || true
         grep "Time per request:" "$output" | head -1 || true
     else
@@ -130,7 +124,6 @@ test_parallel_clients() {
         pids+=($!)
     done
     
-    # Esperar por todos os clientes
     for pid in "${pids[@]}"; do
         if ! wait "$pid" 2>/dev/null; then
             ((failed++)) || true
@@ -156,7 +149,7 @@ test_statistics_accuracy() {
     echo ""
     echo "--- Teste 16: Precisão das estatísticas sob carga ---"
     
-    # Verificar se endpoint /stats existe
+    # verificar se endpoint /stats existe
     local stats_check
     stats_check=$(curl -s -o /dev/null -w "%{http_code}" "${STATS_URL}" 2>/dev/null || echo "000")
     
@@ -165,7 +158,7 @@ test_statistics_accuracy() {
         return
     fi
     
-    # Obter estatísticas iniciais
+    # estatísticas iniciais
     local stats_before
     stats_before=$(curl -s "${STATS_URL}" 2>/dev/null || echo "")
     
@@ -174,7 +167,7 @@ test_statistics_accuracy() {
         return
     fi
     
-    # Fazer um número conhecido de requests
+    # fazer um número conhecido de requests
     local known_requests=100
     echo "A fazer ${known_requests} requests conhecidos..."
     
@@ -186,9 +179,9 @@ test_statistics_accuracy() {
     done
     wait
     
-    sleep 1  # Dar tempo para estatísticas serem atualizadas
+    sleep 2
     
-    # Obter estatísticas finais
+    # estatísticas finais
     local stats_after
     stats_after=$(curl -s "${STATS_URL}" 2>/dev/null || echo "")
     
@@ -197,7 +190,7 @@ test_statistics_accuracy() {
         return
     fi
     
-    # Extrair contadores do HTML (formato: <tr><td>Total Requests</td><td>NUMBER</td></tr>)
+    # contadores do HTML
     local requests_before requests_after
     requests_before=$(echo "$stats_before" | grep -A1 "Total Requests" | grep -oP '<td>\K\d+(?=</td>)' | head -1 || echo "0")
     requests_after=$(echo "$stats_after" | grep -A1 "Total Requests" | grep -oP '<td>\K\d+(?=</td>)' | head -1 || echo "0")
@@ -210,16 +203,14 @@ test_statistics_accuracy() {
     echo "Requests antes: ${requests_before}, depois: ${requests_after}, diferença: ${diff}"
     echo "Esperado: aproximadamente ${known_requests} requests"
     
-    # Se os contadores não mudaram, o endpoint pode não estar implementado corretamente
     if [ "$diff" -eq 0 ]; then
         echo -e "${YELLOW}[WARN]${NC} Contadores não mudaram - /stats pode não estar a atualizar corretamente"
         return
     fi
     
-    # Tolerância de 20% devido a possíveis requests de outros testes
     local tolerance=$((known_requests / 5))
     local lower_bound=$((known_requests - tolerance))
-    local upper_bound=$((known_requests + tolerance + 50))  # +50 para overhead
+    local upper_bound=$((known_requests + tolerance + 50)) # para overhead
     
     if [ "$diff" -ge "$lower_bound" ] && [ "$diff" -le "$upper_bound" ]; then
         echo -e "${GREEN}[OK]${NC} Estatísticas parecem precisas (±20% tolerância)"
@@ -229,13 +220,11 @@ test_statistics_accuracy() {
     fi
 }
 
-# Executar todos os testes
 test_apache_bench
 test_no_dropped_connections
 test_parallel_clients
 test_statistics_accuracy
 
-# Resultado final
 echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then

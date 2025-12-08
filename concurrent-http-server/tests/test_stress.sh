@@ -1,9 +1,4 @@
 #!/bin/bash
-# Testes de Stress (Requisitos 21-24)
-# - Execução por 5+ minutos com carga contínua
-# - Monitorizar memory leaks com Valgrind
-# - Graceful shutdown sob carga
-# - Verificar ausência de processos zombie
 
 set -euo pipefail
 
@@ -15,15 +10,14 @@ echo "========================================"
 echo "   TESTES DE STRESS"
 echo "========================================"
 
-# Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Função global para fazer requests continuamente (usada por background jobs)
+# função para fazer requests continuamente
 make_requests_worker() {
-    # Desabilitar exit-on-error para esta função
+    # desativar exit-on-error para esta função
     set +e
     
     local end_time=$1
@@ -32,7 +26,6 @@ make_requests_worker() {
     local local_requests=0
     local local_errors=0
     
-    # Validar end_time
     if [ -z "$end_time" ] || [ "$end_time" -le 0 ]; then
         echo "ERROR: Invalid end_time in worker" >&2
         return 1
@@ -40,7 +33,7 @@ make_requests_worker() {
     
     local current_time=$(date +%s)
     
-    # Loop até end_time
+    # loop até end_time
     while [ $current_time -lt $end_time ]; do
         if curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/index.html" 2>/dev/null | grep -q "^200$"; then
             echo -n "."
@@ -51,11 +44,10 @@ make_requests_worker() {
             ((local_errors++))
         fi
         sleep 0.1
-        # Atualizar tempo atual
         current_time=$(date +%s)
     done
     
-    # Escrever contadores para ficheiros (append para evitar condições de corrida)
+    # echo dos contadores para ficheiros
     for i in $(seq 1 $local_requests); do
         echo "1" >> "$tmp_requests"
     done
@@ -70,7 +62,7 @@ test_continuous_load() {
     echo "--- Teste 21: Carga contínua por 5+ minutos ---"
     echo "AVISO: Este teste demora ~5 minutos"
     
-    local duration=300  # 5 minutos em segundos
+    local duration=310 
     local start_time=$(date +%s)
     local end_time=$((start_time + duration))
     local request_count=0
@@ -79,13 +71,13 @@ test_continuous_load() {
     echo "Início: $(date)"
     echo "A executar carga contínua até: $(date -d @${end_time})"
     
-    # Criar ficheiros temporários para contadores (vazios, vamos usar append)
+    # ficheiros temporários para os contadores
     local tmp_requests=$(mktemp)
     local tmp_errors=$(mktemp)
     > "$tmp_requests"
     > "$tmp_errors"
     
-    # Lançar múltiplos workers
+    # lançar múltiplos workers
     local num_workers=10
     echo "A lançar ${num_workers} workers para carga contínua..."
     
@@ -93,10 +85,9 @@ test_continuous_load() {
         make_requests_worker $end_time "$tmp_requests" "$tmp_errors" &
     done
     
-    # Esperar que o tempo passe
     wait
     
-    # Ler totais (contar linhas)
+    # contar linhas = total
     request_count=$(wc -l < "$tmp_requests" 2>/dev/null | tr -d ' ' || echo "0")
     error_count=$(wc -l < "$tmp_errors" 2>/dev/null | tr -d ' ' || echo "0")
     
@@ -134,14 +125,13 @@ test_memory_leaks() {
     local valgrind_output
     valgrind_output=$(mktemp)
     
-    # Arrancar servidor com Valgrind
+    # arrancar servidor com Valgrind, 2 min
     valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
              --log-file="$valgrind_output" "$SERVER_BIN" > /dev/null 2>&1 &
     local server_pid=$!
     
-    sleep 5  # Dar mais tempo ao servidor com Valgrind
+    sleep 120
     
-    # Fazer vários requests
     echo "A fazer requests de teste..."
     for i in $(seq 1 100); do
         curl -s -o /dev/null "${BASE_URL}/index.html" 2>/dev/null &
@@ -152,12 +142,10 @@ test_memory_leaks() {
     wait
     
     sleep 2
-    
-    # Fazer shutdown graceful
+    # shutdown
     echo "A fazer shutdown do servidor..."
     kill -TERM $server_pid 2>/dev/null || kill $server_pid 2>/dev/null || true
     
-    # Dar tempo para shutdown limpo
     for i in $(seq 1 10); do
         if ! kill -0 $server_pid 2>/dev/null; then
             break
@@ -165,11 +153,11 @@ test_memory_leaks() {
         sleep 1
     done
     
-    # Forçar kill se necessário
+    #forçar kill se necessário
     kill -9 $server_pid 2>/dev/null || true
     wait $server_pid 2>/dev/null || true
     
-    # Analisar output do Valgrind
+    # analisar output do Valgrind
     if [ -f "$valgrind_output" ]; then
         echo "A analisar relatório do Valgrind..."
         
@@ -190,7 +178,7 @@ test_memory_leaks() {
         else
             echo -e "${YELLOW}[WARN]${NC} Memory leaks detetados"
             echo "Veja detalhes em: $valgrind_output"
-            # Não falhar automaticamente, alguns leaks podem ser do sistema
+            # alguns leaks podem ser do sistema
         fi
     else
         echo -e "${YELLOW}[WARN]${NC} Não foi possível analisar output do Valgrind"
@@ -207,26 +195,24 @@ test_graceful_shutdown() {
     "$SERVER_BIN" > /dev/null 2>&1 &
     local server_pid=$!
     
-    sleep 2
+    sleep 5
     
-    # Iniciar carga
     echo "A gerar carga..."
     for i in $(seq 1 100); do
         curl -s -o /dev/null "${BASE_URL}/index.html" 2>/dev/null &
     done
     
-    sleep 1
+    sleep 5
     
-    # Enviar SIGTERM para graceful shutdown
     echo "A enviar SIGTERM para shutdown graceful..."
     kill -TERM $server_pid 2>/dev/null || true
     
     local shutdown_time=0
     local max_shutdown_time=10
     
-    # Esperar pelo shutdown
+    # esperar pelo shutdown
     while kill -0 $server_pid 2>/dev/null; do
-        sleep 1
+        sleep 3
         ((shutdown_time++)) || true
         
         if [ $shutdown_time -ge $max_shutdown_time ]; then
@@ -254,21 +240,21 @@ test_no_zombies() {
         
         sleep 1
         
-        # Fazer alguns requests
+        # fazer alguns requests
         for i in $(seq 1 10); do
             curl -s -o /dev/null "${BASE_URL}/index.html" 2>/dev/null &
         done
         
         wait
         
-        # Matar servidor
+        # kill no servidor
         kill $server_pid 2>/dev/null || true
         wait $server_pid 2>/dev/null || true
         
         sleep 1
     done
     
-    # Verificar processos zombie relacionados com o servidor
+    # verificar processos zombie relacionados com o servidor
     local zombies
     local zombie_procs
     zombie_procs=$(ps aux | grep '<defunct>' | grep -E 'server|worker|master' | grep -v -E 'grep|forkserver' 2>/dev/null || true)
@@ -288,7 +274,7 @@ test_no_zombies() {
     fi
 }
 
-# Menu de opções (alguns testes demoram muito)
+# menu de opções
 if [ "${QUICK_TEST:-0}" = "1" ]; then
     echo "Modo QUICK_TEST ativado - a saltar testes longos"
     test_graceful_shutdown
@@ -298,8 +284,7 @@ else
     echo "Para modo rápido, use: QUICK_TEST=1 $0"
     echo ""
     
-    # Perguntar ao utilizador se quer executar todos
-    if [ -t 0 ]; then  # Se estamos num terminal interativo
+    if [ -t 0 ]; then  # Se terminal interativo
         read -p "Executar teste de 5 minutos? (s/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Ss]$ ]]; then
@@ -323,7 +308,6 @@ else
     test_no_zombies
 fi
 
-# Resultado final
 echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then

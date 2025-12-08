@@ -80,7 +80,7 @@ static void *worker_thread(void *arg) {
                 ok = 1;
             }
             while ((n = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
-                /* descartar restante resposta */
+                /* descartar o resto das respostas */
             }
         }
 
@@ -128,7 +128,7 @@ int main(int argc, char *argv[]) {
     struct addrinfo hints;
     struct addrinfo *res = NULL;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;      // força IPv4
+    hints.ai_family = AF_INET;      // forçar IPv4
     hints.ai_socktype = SOCK_STREAM;
 
 

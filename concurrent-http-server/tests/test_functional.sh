@@ -1,9 +1,4 @@
 #!/bin/bash
-# Testes Funcionais (Requisitos 9-12)
-# - GET requests para vários tipos de ficheiros
-# - Códigos de status HTTP corretos (200, 404, 403, 500)
-# - Directory index serving
-# - Content-Type headers corretos
 
 set -euo pipefail
 
@@ -14,11 +9,10 @@ echo "========================================"
 echo "   TESTES FUNCIONAIS"
 echo "========================================"
 
-# Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 test_status() {
     local path="$1"
@@ -62,16 +56,9 @@ test_get_file_types() {
     echo ""
     echo "--- Teste 9: GET requests para vários tipos de ficheiros ---"
     
-    # HTML
     test_status "/index.html" "200" "HTML file"
-    
-    # CSS
     test_status "/style.css" "200" "CSS file"
-    
-    # JavaScript
     test_status "/app.js" "200" "JavaScript file"
-    
-    # Image (PNG)
     test_status "/img/logo.png" "200" "PNG image"
 }
 
@@ -102,7 +89,6 @@ test_directory_index() {
     curl -s "${BASE_URL}/" -o "$tmp" 2>/dev/null
     
     if [ -s "$tmp" ]; then
-        # Verifica se é HTML válido
         if grep -q "html\|HTML" "$tmp"; then
             echo -e "${GREEN}[OK]${NC} Directory index (/) retorna conteúdo HTML"
         else
@@ -119,27 +105,18 @@ test_directory_index() {
 test_content_type_headers() {
     echo ""
     echo "--- Teste 12: Content-Type headers corretos ---"
-    
-    # HTML
+
     test_content_type "/index.html" "text/html" "HTML Content-Type"
-    
-    # CSS
     test_content_type "/style.css" "text/css" "CSS Content-Type"
-    
-    # JavaScript
     test_content_type "/app.js" "javascript" "JavaScript Content-Type"
-    
-    # PNG Image
     test_content_type "/img/logo.png" "image" "PNG Content-Type"
 }
 
-# Executar todos os testes
 test_get_file_types
 test_http_status_codes
 test_directory_index
 test_content_type_headers
 
-# Resultado final
 echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then

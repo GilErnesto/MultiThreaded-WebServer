@@ -1,11 +1,9 @@
 #!/bin/bash
-# Script principal para executar todos os testes do servidor HTTP
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Ficheiros de teste
 TEST_FUNCTIONAL="${SCRIPT_DIR}/test_functional.sh"
 TEST_CONCURRENCY="${SCRIPT_DIR}/test_concurrency.sh"
 TEST_LOAD="${SCRIPT_DIR}/test_load.sh"
@@ -15,7 +13,6 @@ TEST_CONCURRENT="${SCRIPT_DIR}/test_concurrent"
 
 FAIL=0
 
-# Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -28,7 +25,7 @@ echo "========================================"
 echo -e "Servidor: ${BASE_URL}${NC}"
 echo ""
 
-# Exportar variáveis para os sub-scripts
+# variáveis para os sub-scripts
 export BASE_URL
 export SERVER_BIN="${SERVER_BIN:-./server}"
 export LOG_FILE="${LOG_FILE:-server.log}"
@@ -82,7 +79,6 @@ main() {
             run_test_suite "$TEST_CONCURRENCY" "Testes de Concorrência"
             run_test_suite "$TEST_LOAD" "Teste de Carga (ab)"
             
-            # Test concurrent em C
             if [ -x "$TEST_CONCURRENT" ]; then
                 echo ""
                 echo -e "${BLUE}========================================"
@@ -117,7 +113,6 @@ main() {
             run_test_suite "$TEST_CONCURRENCY" "Testes de Concorrência"
             run_test_suite "$TEST_LOAD" "Teste de Carga (ab)"
             
-            # Test concurrent em C
             if [ -x "$TEST_CONCURRENT" ]; then
                 echo ""
                 echo -e "${BLUE}========================================"
@@ -137,7 +132,6 @@ main() {
             ;;
     esac
     
-    # Resumo final
     echo ""
     echo -e "${BLUE}========================================"
     echo "   RESUMO FINAL"
@@ -151,23 +145,5 @@ main() {
         exit 1
     fi
 }
-
-# Mostrar ajuda se solicitado
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    echo "Uso: $0 [modo]"
-    echo ""
-    echo "Modos disponíveis:"
-    echo "  normal, (padrão) - Testes essenciais (sem os muito longos)"
-    echo "  quick, fast      - Apenas testes rápidos"
-    echo "  full, complete   - Todos os testes (incluindo 5min+ de stress)"
-    echo "  sync             - Apenas testes de sincronização"
-    echo "  stress           - Apenas testes de stress"
-    echo ""
-    echo "Exemplos:"
-    echo "  $0              # modo normal"
-    echo "  $0 quick        # modo rápido"
-    echo "  $0 full         # todos os testes"
-    exit 0
-fi
 
 main "$@"
