@@ -27,18 +27,11 @@ OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Executable
 TARGET = server
-TARGET_TSAN = server_tsan
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
-
-# Thread Sanitizer version (para detectar race conditions)
-$(TARGET_TSAN): CFLAGS += -fsanitize=thread -O1
-$(TARGET_TSAN): LDFLAGS += -fsanitize=thread
-$(TARGET_TSAN): $(SRCS)
-	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET_TSAN) $(LDFLAGS)
 
 # Ensure obj directory exists
 $(OBJ_DIR):
@@ -54,13 +47,13 @@ $(TEST_CONCURRENT): $(TEST_DIR)/test_concurrent.c
 
 clean:
 	rm -rf $(OBJ_DIR)
-	rm -f $(TARGET) $(TARGET_TSAN)
+	rm -f $(TARGET)
 	rm -f $(TEST_CONCURRENT)
+
+.PHONY: all clean test testSimple testFull run
 
 run: all
 	./server
-
-.PHONY: all clean run test testFull tsan
 
 # Testes normais (essenciais)
 testSimple: $(TARGET) $(TEST_CONCURRENT)
@@ -69,9 +62,3 @@ testSimple: $(TARGET) $(TEST_CONCURRENT)
 # Testes completos (incluindo sync e stress)
 testFull: $(TARGET) $(TEST_CONCURRENT)
 	@$(TEST_DIR)/run_with_server.sh ./$(TARGET) full
-
-# Build com Thread Sanitizer
-tsan: $(TARGET_TSAN)
-	@echo "Servidor compilado com Thread Sanitizer: $(TARGET_TSAN)"
-	@echo "Execute: ./$(TARGET_TSAN)"
-	@echo "Ou use: SERVER_BIN=./$(TARGET_TSAN) make test"

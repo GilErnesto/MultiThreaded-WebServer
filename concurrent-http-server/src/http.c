@@ -27,7 +27,90 @@ const char* get_mime_type(const char* path) {
 
 //  ERROS HTTP
 
+// Tenta ler página de erro de ficheiro, caso contrário usa HTML inline
+static long send_error_page(int client_fd, const char* status_line, const char* error_file, const char* fallback_body) {
+    char error_path[512];
+    snprintf(error_path, sizeof(error_path), "./www/%s", error_file);
+    
+    // Tenta ler a página de erro do ficheiro
+    FILE* file = fopen(error_path, "rb");
+    char* body = NULL;
+    size_t body_len = 0;
+    
+    if (file) {
+        fseek(file, 0, SEEK_END);
+        long file_size = ftell(file);
+        if (file_size > 0 && file_size < 100000) { // Máximo 100KB para páginas de erro
+            fseek(file, 0, SEEK_SET);
+            body = malloc(file_size + 1);
+            if (body && fread(body, 1, file_size, file) == (size_t)file_size) {
+                body[file_size] = '\0';
+                body_len = file_size;
+            } else {
+                free(body);
+                body = NULL;
+            }
+        }
+        fclose(file);
+    }
+    
+    // Se não conseguiu ler o ficheiro, usa fallback
+    if (!body) {
+        body = (char*)fallback_body;
+        body_len = strlen(fallback_body);
+    }
+    
+    char date_header[128];
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    struct tm *gmt = gmtime_r(&now, &tm_buf);
+    if (!gmt) {
+        strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+    } else {
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    }
+
+    char headers[512];
+    snprintf(headers, sizeof(headers),
+        "%s\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Server: ConcurrentHTTP/1.0\r\n"
+        "Date: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status_line, body_len, date_header);
+
+    long bytes_sent = 0;
+    bytes_sent += send(client_fd, headers, strlen(headers), 0);
+    bytes_sent += send(client_fd, body, body_len, 0);
+    
+    if (body != fallback_body) {
+        free(body);
+    }
+    
+    return bytes_sent;
+}
+
 long send_error(int client_fd, const char* status_line, const char* body) {
+    // Mapeia status_line para ficheiro de erro apropriado
+    const char* error_file = NULL;
+    
+    if (strstr(status_line, "403")) {
+        error_file = "403.html";
+    } else if (strstr(status_line, "404")) {
+        error_file = "404.html";
+    } else if (strstr(status_line, "500")) {
+        error_file = "500.html";
+    } else if (strstr(status_line, "503")) {
+        error_file = "503.html";
+    }
+    
+    if (error_file) {
+        return send_error_page(client_fd, status_line, error_file, body);
+    }
+    
+    // Para outros erros (400, 501), usa inline
     char headers[256];
     size_t body_len = strlen(body);
 
@@ -97,7 +180,14 @@ ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
 
     while (total < size - 1) {
         ssize_t n = recv(client_fd, buffer + total, size - 1 - total, 0);
-        if (n <= 0) break;
+        if (n < 0) {
+            perror("recv");
+            break;
+        }
+        if (n == 0) {
+            // Cliente fechou conexão
+            break;
+        }
 
         total += n;
         buffer[total] = '\0';

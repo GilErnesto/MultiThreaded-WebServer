@@ -22,13 +22,16 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     fflush(stdout);
     
     // Criar logger
+    printf("[WORKER PID=%d] Criando logger...\n", getpid());
+    fflush(stdout);
     logger_t *logger = create_logger(sems, config);
     if (!logger) {
-        fprintf(stderr, "Erro ao criar logger\n");
+        fprintf(stderr, "[WORKER PID=%d] Erro ao criar logger\n", getpid());
         exit(1);
     }
 
-    printf("Worker process started with %d threads\n", config->threads_per_worker);
+    printf("[WORKER PID=%d] Worker process started with %d threads\n", getpid(), config->threads_per_worker);
+    fflush(stdout);
 
     // Iniciar pool de threads - esta função nunca retorna
     thread_pool_start(shared, sems, config, logger, server_fd);

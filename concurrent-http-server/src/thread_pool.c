@@ -1,3 +1,6 @@
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include "thread_pool.h"
 #include "http.h"
 #include "cache.h"
@@ -8,6 +11,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <time.h>
 
 // Estrutura de argumentos para threads
 typedef struct {
@@ -84,28 +88,39 @@ static void* worker_thread(void *arg) {
     thread_args_t *args = (thread_args_t*)arg;
     shared_data_t *shared = args->shared;
     semaphores_t  *sems   = args->sems;
-    int server_fd = args->server_fd;
 
     for (;;) {
-        // Cada thread faz accept() diretamente
-        int client_fd = accept(server_fd, NULL, NULL);
+        // Consome uma conexão da fila (modelo producer-consumer)
+        int client_fd = dequeue_connection(shared, sems);
         if (client_fd < 0) {
-            perror("accept failed (worker thread)");
+            perror("dequeue_connection failed (worker thread)");
             continue;
         }
 
-        // Incrementar conexões ativas e total de pedidos
+        // Incrementar conexões ativas
         sem_wait(sems->stats);
         shared->stats.active_connections++;
-        shared->stats.total_requests++;
         sem_post(sems->stats);
+
+        // Marca o início do processamento do pedido
+        struct timespec start_time, end_time;
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
 
         // Processar o pedido HTTP e obter bytes transferidos
         long bytes = handle_client(client_fd, args);
 
-        // Atualizar bytes transferidos e decrementar conexões ativas
+        // Marca o fim do processamento
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        
+        // Calcula tempo de resposta em segundos
+        double response_time = (end_time.tv_sec - start_time.tv_sec) + 
+                              (end_time.tv_nsec - start_time.tv_nsec) / 1000000000.0;
+
+        // Atualizar estatísticas: bytes, tempo de resposta, e decrementar conexões ativas
         sem_wait(sems->stats);
         shared->stats.bytes_transferred += bytes;
+        shared->stats.total_response_time += response_time;
+        shared->stats.completed_requests++;
         shared->stats.active_connections--;
         sem_post(sems->stats);
     }
@@ -160,6 +175,12 @@ static long handle_client(int client_fd, thread_args_t *args) {
     // Endpoint /stats - retorna estatísticas do servidor
     if (strcmp(req.path, "/stats") == 0 && strcmp(req.method, "GET") == 0) {
         sem_wait(args->sems->stats);
+        
+        double avg_response_time = 0.0;
+        if (args->shared->stats.completed_requests > 0) {
+            avg_response_time = args->shared->stats.total_response_time / args->shared->stats.completed_requests;
+        }
+        
         char stats_body[2048];
         snprintf(stats_body, sizeof(stats_body),
             "<!DOCTYPE html>\n"
@@ -168,25 +189,33 @@ static long handle_client(int client_fd, thread_args_t *args) {
             "<h1>Server Statistics</h1>\n"
             "<table border='1'>\n"
             "<tr><td>Total Requests</td><td>%ld</td></tr>\n"
+            "<tr><td>Completed Requests</td><td>%ld</td></tr>\n"
             "<tr><td>Bytes Transferred</td><td>%ld</td></tr>\n"
+            "<tr><td>Average Response Time</td><td>%.4f s</td></tr>\n"
             "<tr><td>Active Connections</td><td>%d</td></tr>\n"
+            "<tr><td>Queue Size</td><td>%d</td></tr>\n"
             "<tr><td>Status 200 (OK)</td><td>%ld</td></tr>\n"
             "<tr><td>Status 400 (Bad Request)</td><td>%ld</td></tr>\n"
             "<tr><td>Status 403 (Forbidden)</td><td>%ld</td></tr>\n"
             "<tr><td>Status 404 (Not Found)</td><td>%ld</td></tr>\n"
             "<tr><td>Status 500 (Internal Error)</td><td>%ld</td></tr>\n"
             "<tr><td>Status 501 (Not Implemented)</td><td>%ld</td></tr>\n"
+            "<tr><td>Status 503 (Service Unavailable)</td><td>%ld</td></tr>\n"
             "</table>\n"
             "</body></html>\n",
             args->shared->stats.total_requests,
+            args->shared->stats.completed_requests,
             args->shared->stats.bytes_transferred,
+            avg_response_time,
             args->shared->stats.active_connections,
+            args->shared->queue.count,
             args->shared->stats.status_200,
             args->shared->stats.status_400,
             args->shared->stats.status_403,
             args->shared->stats.status_404,
             args->shared->stats.status_500,
-            args->shared->stats.status_501
+            args->shared->stats.status_501,
+            args->shared->stats.status_503
         );
         sem_post(args->sems->stats);
         
@@ -246,11 +275,22 @@ static long handle_client(int client_fd, thread_args_t *args) {
     // constrói caminho real a partir da DOCUMENT_ROOT
     char fullpath[1024];
     if (strcmp(req.path, "/") == 0) {
+        // Raiz → index.html
         snprintf(fullpath, sizeof(fullpath), "%s/index.html",
                  args->config->document_root);
     } else {
+        // Caminho normal
         snprintf(fullpath, sizeof(fullpath), "%s%s",
                  args->config->document_root, req.path);
+        
+        // Se o caminho termina em '/', tentar servir index.html desse diretório
+        size_t len = strlen(fullpath);
+        if (len > 0 && fullpath[len - 1] == '/') {
+            // Verificar se há espaço suficiente para adicionar "index.html"
+            if (len + 10 < sizeof(fullpath)) {
+                strncat(fullpath, "index.html", sizeof(fullpath) - len - 1);
+            }
+        }
     }
 
     int send_body = strcmp(req.method, "HEAD") != 0;

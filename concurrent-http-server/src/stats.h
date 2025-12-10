@@ -23,7 +23,10 @@ typedef struct {
     long status_404;
     long status_500;
     long status_501;
+    long status_503;
     int active_connections;
+    double total_response_time;  // soma de todos os tempos de resposta em segundos
+    long completed_requests;     // pedidos completados (para calcular média)
 } server_stats_t;
 
 // Estrutura de dados partilhada
@@ -48,5 +51,9 @@ typedef struct {
 int init_semaphores(semaphores_t *s, int max_queue_size);
 int reopen_semaphores(semaphores_t *s);
 void destroy_semaphores(semaphores_t *s);
+
+// Funções para gestão da fila de conexões
+int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd);
+int dequeue_connection(shared_data_t *shared, semaphores_t *sems);
 
 #endif

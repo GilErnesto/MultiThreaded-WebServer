@@ -92,12 +92,16 @@ test_helgrind() {
         fi
         
         # Procurar por data races
-        local data_races
-        data_races=$(grep -c "Possible data race" "$helgrind_output" 2>/dev/null || echo "0")
+        local data_races=0
+        if grep -q "Possible data race" "$helgrind_output" 2>/dev/null; then
+            data_races=$(grep "Possible data race" "$helgrind_output" 2>/dev/null | wc -l | xargs)
+        fi
         
         # Procurar por outros problemas
-        local lock_order
-        lock_order=$(grep -c "lock order" "$helgrind_output" 2>/dev/null || echo "0")
+        local lock_order=0
+        if grep -q "lock order" "$helgrind_output" 2>/dev/null; then
+            lock_order=$(grep "lock order" "$helgrind_output" 2>/dev/null | wc -l | xargs)
+        fi
         
         local total_issues=$((data_races + lock_order))
         
@@ -124,25 +128,23 @@ test_helgrind() {
 
 test_thread_sanitizer() {
     echo ""
-    echo "--- Teste 17b: Thread Sanitizer (alternativa ao Helgrind) ---"
+    echo "--- Teste 17b: Valgrind DRD (Data Race Detector) ---"
     
-    local tsan_binary="./server_tsan"
-    if [ ! -f "$tsan_binary" ]; then
-        echo -e "${YELLOW}[SKIP]${NC} Servidor não compilado com Thread Sanitizer"
-        echo "Para habilitar: make tsan"
+    if ! command -v valgrind &> /dev/null; then
+        echo -e "${YELLOW}[SKIP]${NC} Valgrind não está instalado"
         return
     fi
     
-    echo "A arrancar servidor com Thread Sanitizer..."
+    echo "A arrancar servidor com Valgrind DRD..."
     
-    local tsan_output=$(mktemp)
-    "$tsan_binary" > /dev/null 2>"$tsan_output" &
+    local drd_output=$(mktemp)
+    valgrind --tool=drd --log-file="$drd_output" ./server > /dev/null 2>&1 &
     local server_pid=$!
     
-    sleep 2
+    sleep 3
     
     echo "A fazer requests de teste..."
-    for i in $(seq 1 50); do
+    for i in $(seq 1 30); do
         curl -s -o /dev/null "${BASE_URL}/index.html" 2>/dev/null &
     done
     wait
@@ -152,22 +154,24 @@ test_thread_sanitizer() {
     kill $server_pid 2>/dev/null || true
     wait $server_pid 2>/dev/null || true
     
-    # analisar output do Thread Sanitizer
-    if [ -f "$tsan_output" ]; then
-        local data_races
-        data_races=$(grep "WARNING: ThreadSanitizer: data race" "$tsan_output" 2>/dev/null | wc -l)
+    # analisar output do DRD
+    if [ -f "$drd_output" ]; then
+        local data_races=0
+        if grep -q "Conflicting " "$drd_output" 2>/dev/null; then
+            data_races=$(grep "Conflicting " "$drd_output" 2>/dev/null | wc -l | xargs)
+        fi
         
         if [ "$data_races" -eq 0 ]; then
-            echo -e "${GREEN}[OK]${NC} Thread Sanitizer não detetou data races"
+            echo -e "${GREEN}[OK]${NC} Valgrind DRD não detetou data races"
         else
-            echo -e "${RED}[FAIL]${NC} Thread Sanitizer detetou ${data_races} data races"
-            echo "Veja detalhes em: $tsan_output"
+            echo -e "${RED}[FAIL]${NC} Valgrind DRD detetou ${data_races} possíveis data races"
+            echo "Veja detalhes em: $drd_output"
             FAIL=1
         fi
         
-        echo "Relatório salvo em: $tsan_output"
+        echo "Relatório salvo em: $drd_output"
     else
-        echo -e "${YELLOW}[WARN]${NC} Não foi possível analisar output do Thread Sanitizer"
+        echo -e "${YELLOW}[WARN]${NC} Não foi possível analisar output do Valgrind DRD"
     fi
 }
 

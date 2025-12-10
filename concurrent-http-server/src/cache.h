@@ -1,7 +1,6 @@
 #ifndef CACHE_H
 #define CACHE_H
 
-#define _GNU_SOURCE
 #include <stddef.h>
 #include <pthread.h>
 

@@ -111,3 +111,55 @@ void destroy_semaphores(semaphores_t *s) {
     sem_unlink(SEM_STATS_NAME);
     sem_unlink(SEM_LOG_NAME);
 }
+
+// Função para enfileirar uma conexão (produtor = master)
+int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd) {
+    // Espera por espaço livre na fila
+    if (sem_wait(sems->empty) != 0) {
+        return -1;
+    }
+    
+    // Exclusão mútua para manipular a fila
+    if (sem_wait(sems->mutex) != 0) {
+        sem_post(sems->empty);
+        return -1;
+    }
+    
+    // Adiciona o socket à fila
+    shared->queue.sockets[shared->queue.rear] = client_fd;
+    shared->queue.rear = (shared->queue.rear + 1) % MAX_QUEUE_SIZE;
+    shared->queue.count++;
+    
+    sem_post(sems->mutex);
+    
+    // Sinaliza que há um item disponível
+    sem_post(sems->full);
+    
+    return 0;
+}
+
+// Função para desenfileirar uma conexão (consumidor = worker thread)
+int dequeue_connection(shared_data_t *shared, semaphores_t *sems) {
+    // Espera por item disponível na fila
+    if (sem_wait(sems->full) != 0) {
+        return -1;
+    }
+    
+    // Exclusão mútua para manipular a fila
+    if (sem_wait(sems->mutex) != 0) {
+        sem_post(sems->full);
+        return -1;
+    }
+    
+    // Remove o socket da fila
+    int client_fd = shared->queue.sockets[shared->queue.front];
+    shared->queue.front = (shared->queue.front + 1) % MAX_QUEUE_SIZE;
+    shared->queue.count--;
+    
+    sem_post(sems->mutex);
+    
+    // Sinaliza que há espaço livre
+    sem_post(sems->empty);
+    
+    return client_fd;
+}
