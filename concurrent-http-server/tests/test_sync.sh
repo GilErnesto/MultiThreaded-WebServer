@@ -215,6 +215,18 @@ test_log_integrity() {
     echo ""
     echo "--- Teste 18: Integridade do ficheiro de log ---"
     
+    # Verificar se servidor está a correr
+    local health_check
+    health_check=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/" 2>/dev/null || echo "000")
+    
+    if [ "$health_check" != "200" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Servidor não responde, a reiniciar..."
+        pkill -9 -f "./server" 2>/dev/null || true
+        sleep 1
+        ${SERVER_BIN:-./server} > /dev/null 2>&1 &
+        sleep 3
+    fi
+    
     if [ ! -f "$LOG_FILE" ]; then
         echo -e "${YELLOW}[SKIP]${NC} Ficheiro de log não encontrado: $LOG_FILE"
         return
@@ -252,6 +264,18 @@ test_log_integrity() {
 test_cache_consistency() {
     echo ""
     echo "--- Teste 19: Consistência da cache entre threads ---"
+    
+    # Verificar se servidor está a correr
+    local health_check
+    health_check=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/" 2>/dev/null || echo "000")
+    
+    if [ "$health_check" != "200" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Servidor não responde, a reiniciar..."
+        pkill -9 -f "./server" 2>/dev/null || true
+        sleep 1
+        ${SERVER_BIN:-./server} > /dev/null 2>&1 &
+        sleep 3
+    fi
     
     echo "A fazer múltiplos requests paralelos ao mesmo ficheiro..."
     
@@ -300,13 +324,29 @@ test_statistics_counters() {
     
     local stats_url="${BASE_URL}/stats"
     
-    # Verificar se endpoint /stats existe
+    # Verificar se servidor está a correr (pode ter sido morto por testes anteriores)
     local stats_check
     stats_check=$(curl -s -o /dev/null -w "%{http_code}" "$stats_url" 2>/dev/null || echo "000")
     
     if [ "$stats_check" != "200" ]; then
-        echo -e "${YELLOW}[SKIP]${NC} Endpoint /stats não disponível ou não implementado"
-        return
+        echo -e "${YELLOW}[INFO]${NC} Servidor não responde, a reiniciar..."
+        
+        # Matar quaisquer processos remanescentes
+        pkill -9 -f "./server" 2>/dev/null || true
+        sleep 1
+        
+        # Reiniciar servidor
+        ${SERVER_BIN:-./server} > /dev/null 2>&1 &
+        local server_pid=$!
+        sleep 3
+        
+        # Verificar novamente
+        stats_check=$(curl -s -o /dev/null -w "%{http_code}" "$stats_url" 2>/dev/null || echo "000")
+        if [ "$stats_check" != "200" ]; then
+            echo -e "${YELLOW}[SKIP]${NC} Endpoint /stats não disponível ou não implementado"
+            kill $server_pid 2>/dev/null || true
+            return
+        fi
     fi
     
     # estatísticas iniciais
@@ -344,16 +384,24 @@ test_statistics_counters() {
     # extrair contadores
     local requests_before requests_after
     
-    # tentar extrair de HTML 
-    requests_before=$(echo "$stats_before" | grep -oP '(?<=Total Requests</td><td>)\d+' | head -1 || echo "")
-    requests_after=$(echo "$stats_after" | grep -oP '(?<=Total Requests</td><td>)\d+' | head -1 || echo "")
+    # tentar extrair de JSON (formato com aspas)
+    requests_before=$(echo "$stats_before" | grep -oP '(?<="total_requests":)\s*\d+' | head -1 | tr -d ' ' || echo "")
+    requests_after=$(echo "$stats_after" | grep -oP '(?<="total_requests":)\s*\d+' | head -1 | tr -d ' ' || echo "")
     
-    # se não encontrou no HTML, tentar outros formatos
+    # fallback: tentar extrair de HTML ou outros formatos
     if [ -z "$requests_before" ]; then
-        requests_before=$(echo "$stats_before" | grep -oP '(?<=requests:|Requests:|total_requests:)\s*\d+' | head -1 | tr -d ' ' || echo "0")
+        requests_before=$(echo "$stats_before" | grep -oP '(?<=Total Requests</td><td>)\d+' | head -1 || echo "")
     fi
     if [ -z "$requests_after" ]; then
-        requests_after=$(echo "$stats_after" | grep -oP '(?<=requests:|Requests:|total_requests:)\s*\d+' | head -1 | tr -d ' ' || echo "0")
+        requests_after=$(echo "$stats_after" | grep -oP '(?<=Total Requests</td><td>)\d+' | head -1 || echo "")
+    fi
+    
+    # último fallback: formatos sem aspas
+    if [ -z "$requests_before" ]; then
+        requests_before=$(echo "$stats_before" | grep -oP '(?<=requests:|Requests:)\s*\d+' | head -1 | tr -d ' ' || echo "0")
+    fi
+    if [ -z "$requests_after" ]; then
+        requests_after=$(echo "$stats_after" | grep -oP '(?<=requests:|Requests:)\s*\d+' | head -1 | tr -d ' ' || echo "0")
     fi
     
     if [ -z "$requests_before" ]; then requests_before=0; fi

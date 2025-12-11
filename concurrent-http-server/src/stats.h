@@ -2,6 +2,7 @@
 #define STATS_H
 
 #include <semaphore.h>
+#include <time.h>
 
 #define MAX_QUEUE_SIZE 100
 
@@ -25,6 +26,7 @@ typedef struct {
     int active_connections;
     double total_response_time;  // soma dos tempos de resposta em segundos
     long completed_requests;     // para calcular média
+    time_t server_start_time;    // timestamp de início do servidor
 } server_stats_t;
 
 typedef struct {

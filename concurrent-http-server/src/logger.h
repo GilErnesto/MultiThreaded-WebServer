@@ -8,7 +8,7 @@
 typedef struct {
     semaphores_t    *sems;
     server_config_t *config;
-    FILE            *log_fp;
+    int              log_fd;  // file descriptor instead of FILE* for O_APPEND
 } logger_t;
 
 logger_t* create_logger(semaphores_t *sems, server_config_t *config);

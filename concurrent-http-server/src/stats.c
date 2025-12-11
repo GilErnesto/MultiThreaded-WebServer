@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <time.h>
 
 #define SHM_NAME "/webserver_shm"
 
@@ -42,6 +43,7 @@ shared_data_t* create_shared_memory() {
     data->queue.front = 0;
     data->queue.rear  = 0;
     data->queue.count = 0;
+    data->stats.server_start_time = time(NULL);
 
     return data;
 }

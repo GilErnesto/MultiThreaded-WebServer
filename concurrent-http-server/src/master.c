@@ -19,6 +19,9 @@
 #include "stats.h"
 #include "master.h"
 
+// Variável de shutdown do worker (definida em worker.c)
+extern volatile sig_atomic_t worker_shutdown;
+
 static volatile sig_atomic_t shutdown_requested = 0;
 static int global_server_fd = -1;
 static pid_t *global_worker_pids = NULL;
@@ -239,8 +242,16 @@ int master_main(void) {
             
             worker_loop(shared, &sems, &config, server_fd);
             
-            fprintf(stderr, "[WORKER %d] ERRO: worker_loop retornou!\n", i);
-            _exit(1);
+            // worker_loop retorna durante shutdown graceful (SIGTERM)
+            // Verificar se foi shutdown ou erro inesperado
+            if (worker_shutdown) {
+                // Shutdown normal, sair silenciosamente
+                _exit(0);
+            } else {
+                // Erro inesperado
+                fprintf(stderr, "[WORKER %d] ERRO: worker_loop retornou inesperadamente!\n", i);
+                _exit(1);
+            }
         }
         
         worker_pids[i] = pid;

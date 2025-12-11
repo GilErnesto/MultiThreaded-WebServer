@@ -161,6 +161,26 @@ int parse_http_request(const char *buffer, HttpRequest *req) {
     req->has_range = 0;
     req->range_start = -1;
     req->range_end = -1;
+    
+    // inicializa hostname
+    req->hostname[0] = '\0';
+
+    // procura header Host: para virtual host support
+    const char *host_header = strcasestr(buffer, "Host:");
+    if (host_header) {
+        const char *host_value = host_header + 5;
+        while (*host_value == ' ' || *host_value == '\t') host_value++;
+        
+        // copia hostname até encontrar \r, \n, ou espaço
+        int i = 0;
+        while (host_value[i] != '\0' && host_value[i] != '\r' && 
+               host_value[i] != '\n' && host_value[i] != ' ' && 
+               i < (int)sizeof(req->hostname) - 1) {
+            req->hostname[i] = host_value[i];
+            i++;
+        }
+        req->hostname[i] = '\0';
+    }
 
     // procura header Range: bytes=START-END no buffer completo
     const char *range_header = strcasestr(buffer, "Range:");
@@ -543,4 +563,276 @@ long send_file_with_cache(int client_fd, const char* fullpath, int send_body, ca
     }
     
     return bytes_sent;
+}
+
+// envia resposta JSON (para endpoint /stats)
+long send_json_response(int client_fd, const char* json_body, int send_body) {
+    char date_header[128];
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    struct tm *gmt = gmtime_r(&now, &tm_buf);
+    if (!gmt) {
+        strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+    } else {
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    }
+
+    size_t body_len = strlen(json_body);
+    
+    char headers[512];
+    int hlen = snprintf(headers, sizeof(headers),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Server: ConcurrentHTTP/1.0\r\n"
+        "Date: %s\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n",
+        body_len, date_header);
+
+    if (hlen < 0) return 0;
+
+    long total_sent = 0;
+    total_sent += send(client_fd, headers, hlen, 0);
+    
+    if (send_body) {
+        total_sent += send(client_fd, json_body, body_len, 0);
+    }
+    
+    return total_sent;
+}
+
+// envia resposta HTML (para endpoint /dashboard)
+long send_html_response(int client_fd, const char* html_body, int send_body) {
+    char date_header[128];
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    struct tm *gmt = gmtime_r(&now, &tm_buf);
+    if (!gmt) {
+        strncpy(date_header, "Thu, 01 Jan 1970 00:00:00 GMT", sizeof(date_header));
+    } else {
+        strftime(date_header, sizeof(date_header), "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    }
+
+    size_t body_len = strlen(html_body);
+    
+    char headers[512];
+    int hlen = snprintf(headers, sizeof(headers),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Server: ConcurrentHTTP/1.0\r\n"
+        "Date: %s\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        body_len, date_header);
+
+    if (hlen < 0) return 0;
+
+    long total_sent = 0;
+    total_sent += send(client_fd, headers, hlen, 0);
+    
+    if (send_body) {
+        total_sent += send(client_fd, html_body, body_len, 0);
+    }
+    
+    return total_sent;
+}
+
+// gera página HTML do dashboard com JavaScript inline para auto-refresh
+void generate_dashboard_html(char *buffer, size_t buffer_size) {
+    snprintf(buffer, buffer_size,
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "    <meta charset=\"utf-8\">\n"
+        "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        "    <title>Server Dashboard - ConcurrentHTTP</title>\n"
+        "    <style>\n"
+        "        * { margin: 0; padding: 0; box-sizing: border-box; }\n"
+        "        body {\n"
+        "            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;\n"
+        "            min-height: 100vh;\n"
+        "            padding: 20px;\n"
+        "            color: #333;\n"
+        "        }\n"
+        "        .container {\n"
+        "            max-width: 1200px;\n"
+        "            margin: 0 auto;\n"
+        "        }\n"
+        "        h1 {\n"
+        "            text-align: center;\n"
+        "            color: black;\n"
+        "            margin-bottom: 30px;\n"
+        "            font-size: 2.5em;\n"
+        "            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);\n"
+        "        }\n"
+        "        .stats-grid {\n"
+        "            display: grid;\n"
+        "            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));\n"
+        "            gap: 20px;\n"
+        "            margin-bottom: 20px;\n"
+        "        }\n"
+        "        .stat-card {\n"
+        "            background: white;\n"
+        "            border-radius: 12px;\n"
+        "            padding: 25px;\n"
+        "            box-shadow: 0 4px 6px rgba(0,0,0,0.1);\n"
+        "            transition: transform 0.2s, box-shadow 0.2s;\n"
+        "        }\n"
+        "        .stat-card:hover {\n"
+        "            transform: translateY(-5px);\n"
+        "            box-shadow: 0 8px 12px rgba(0,0,0,0.15);\n"
+        "        }\n"
+        "        .stat-label {\n"
+        "            font-size: 0.9em;\n"
+        "            color: #666;\n"
+        "            text-transform: uppercase;\n"
+        "            letter-spacing: 0.5px;\n"
+        "            margin-bottom: 8px;\n"
+        "        }\n"
+        "        .stat-value {\n"
+        "            font-size: 2.2em;\n"
+        "            font-weight: bold;\n"
+        "            color: black;\n"
+        "        }\n"
+        "        .stat-card.primary .stat-value { color: black; }\n"
+        "        .stat-card.success .stat-value { color: black; }\n"
+        "        .stat-card.warning .stat-value { color: black; }\n"
+        "        .stat-card.danger .stat-value { color: black; }\n"
+        "        .status-table {\n"
+        "            background: white;\n"
+        "            border-radius: 12px;\n"
+        "            padding: 25px;\n"
+        "            box-shadow: 0 4px 6px rgba(0,0,0,0.1);\n"
+        "            overflow-x: auto;\n"
+        "        }\n"
+        "        .status-table h2 {\n"
+        "            margin-bottom: 15px;\n"
+        "            color: #333;\n"
+        "        }\n"
+        "        table {\n"
+        "            width: 100%%;\n"
+        "            border-collapse: collapse;\n"
+        "        }\n"
+        "        th, td {\n"
+        "            padding: 12px;\n"
+        "            text-align: left;\n"
+        "            border-bottom: 1px solid #e5e7eb;\n"
+        "        }\n"
+        "        th {\n"
+        "            background: #f9fafb;\n"
+        "            font-weight: 600;\n"
+        "            color: #666;\n"
+        "        }\n"
+        "        .update-indicator {\n"
+        "            text-align: center;\n"
+        "            color: black;\n"
+        "            margin-top: 20px;\n"
+        "            font-size: 0.9em;\n"
+        "            opacity: 0.8;\n"
+        "        }\n"
+        "        .loading {\n"
+        "            text-align: center;\n"
+        "            color: black;\n"
+        "            font-size: 1.2em;\n"
+        "            margin-top: 50px;\n"
+        "        }\n"
+        "    </style>\n"
+        "</head>\n"
+        "<body>\n"
+        "    <div class=\"container\">\n"
+        "        <h1>Server Dashboard</h1>\n"
+        "        <div id=\"stats-container\" class=\"loading\">Loading statistics...</div>\n"
+        "        <div class=\"update-indicator\" id=\"update-indicator\">Auto-refresh every 2 seconds</div>\n"
+        "    </div>\n"
+        "    <script>\n"
+        "        function formatBytes(bytes) {\n"
+        "            if (bytes < 1024) return bytes + ' B';\n"
+        "            if (bytes < 1024*1024) return (bytes/1024).toFixed(2) + ' KB';\n"
+        "            if (bytes < 1024*1024*1024) return (bytes/(1024*1024)).toFixed(2) + ' MB';\n"
+        "            return (bytes/(1024*1024*1024)).toFixed(2) + ' GB';\n"
+        "        }\n"
+        "        function formatUptime(seconds) {\n"
+        "            const d = Math.floor(seconds / 86400);\n"
+        "            const h = Math.floor((seconds %% 86400) / 3600);\n"
+        "            const m = Math.floor((seconds %% 3600) / 60);\n"
+        "            const s = seconds %% 60;\n"
+        "            let result = '';\n"
+        "            if (d > 0) result += d + 'd ';\n"
+        "            if (h > 0 || d > 0) result += h + 'h ';\n"
+        "            if (m > 0 || h > 0 || d > 0) result += m + 'm ';\n"
+        "            result += s + 's';\n"
+        "            return result;\n"
+        "        }\n"
+        "        function updateStats() {\n"
+        "            const indicator = document.getElementById('update-indicator');\n"
+        "            indicator.textContent = 'Updating...';\n"
+        "            fetch('/stats')\n"
+        "                .then(r => r.json())\n"
+        "                .then(data => {\n"
+        "                    const totalStatus = data.requests_by_status['200'] + data.requests_by_status['400'] + \n"
+        "                                      data.requests_by_status['403'] + data.requests_by_status['404'] + \n"
+        "                                      data.requests_by_status['500'] + data.requests_by_status['501'] + \n"
+        "                                      data.requests_by_status['503'];\n"
+        "                    document.getElementById('stats-container').innerHTML = `\n"
+        "                        <div class=\"stats-grid\">\n"
+        "                            <div class=\"stat-card primary\">\n"
+        "                                <div class=\"stat-label\">Total Requests</div>\n"
+        "                                <div class=\"stat-value\">${data.total_requests.toLocaleString()}</div>\n"
+        "                            </div>\n"
+        "                            <div class=\"stat-card success\">\n"
+        "                                <div class=\"stat-label\">Total Bytes</div>\n"
+        "                                <div class=\"stat-value\">${formatBytes(data.total_bytes)}</div>\n"
+        "                            </div>\n"
+        "                            <div class=\"stat-card warning\">\n"
+        "                                <div class=\"stat-label\">Avg Response</div>\n"
+        "                                <div class=\"stat-value\">${data.avg_response_time_ms.toFixed(2)} ms</div>\n"
+        "                            </div>\n"
+        "                            <div class=\"stat-card danger\">\n"
+        "                                <div class=\"stat-label\">Active Connections</div>\n"
+        "                                <div class=\"stat-value\">${data.active_connections}</div>\n"
+        "                            </div>\n"
+        "                            <div class=\"stat-card primary\">\n"
+        "                                <div class=\"stat-label\">Uptime</div>\n"
+        "                                <div class=\"stat-value\" style=\"font-size: 1.5em;\">${formatUptime(data.uptime_seconds)}</div>\n"
+        "                            </div>\n"
+        "                        </div>\n"
+        "                        <div class=\"status-table\">\n"
+        "                            <h2>HTTP Status Codes</h2>\n"
+        "                            <table>\n"
+        "                                <thead>\n"
+        "                                    <tr>\n"
+        "                                        <th>Status Code</th>\n"
+        "                                        <th>Count</th>\n"
+        "                                        <th>Percentage</th>\n"
+        "                                    </tr>\n"
+        "                                </thead>\n"
+        "                                <tbody>\n"
+        "                                    <tr><td>200 OK</td><td>${data.requests_by_status['200']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['200']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>400 Bad Request</td><td>${data.requests_by_status['400']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['400']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>403 Forbidden</td><td>${data.requests_by_status['403']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['403']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>404 Not Found</td><td>${data.requests_by_status['404']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['404']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>500 Internal Error</td><td>${data.requests_by_status['500']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['500']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>501 Not Implemented</td><td>${data.requests_by_status['501']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['501']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                    <tr><td>503 Service Unavailable</td><td>${data.requests_by_status['503']}</td><td>${totalStatus > 0 ? ((data.requests_by_status['503']/totalStatus)*100).toFixed(1) : 0}%%</td></tr>\n"
+        "                                </tbody>\n"
+        "                            </table>\n"
+        "                        </div>\n"
+        "                    `;\n"
+        "                    indicator.textContent = 'Auto-refresh every 2 seconds • Last update: ' + new Date().toLocaleTimeString();\n"
+        "                })\n"
+        "                .catch(err => {\n"
+        "                    console.error('Error fetching stats:', err);\n"
+        "                    document.getElementById('stats-container').innerHTML = '<div class=\"loading\">Error loading statistics</div>';\n"
+        "                    indicator.textContent = 'Error - Retrying in 2 seconds...';\n"
+        "                });\n"
+        "        }\n"
+        "        updateStats();\n"
+        "        setInterval(updateStats, 2000);\n"
+        "    </script>\n"
+        "</body>\n"
+        "</html>"
+    );
 }

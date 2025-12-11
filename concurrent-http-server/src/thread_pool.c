@@ -379,65 +379,71 @@ static long handle_client_request(int client_fd, HttpRequest *req, thread_args_t
         return sent;
     }
     
-    // endpoint /stats - mostra estatísticas
-    if (strcmp(req->path, "/stats") == 0 && strcmp(req->method, "GET") == 0) {
+    // endpoint /stats - retorna JSON com estatísticas
+    if (strcmp(req->path, "/stats") == 0 && (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)) {
         sem_wait(args->sems->stats);
         
-        double avg_response_time = 0.0;
+        double avg_response_time_ms = 0.0;
         if (args->shared->stats.completed_requests > 0) {
-            avg_response_time = args->shared->stats.total_response_time / args->shared->stats.completed_requests;
+            avg_response_time_ms = (args->shared->stats.total_response_time / 
+                                   args->shared->stats.completed_requests) * 1000.0;
         }
         
-        char stats_body[2048];
-        snprintf(stats_body, sizeof(stats_body),
-            "<!DOCTYPE html>\n"
-            "<html><head><title>Server Statistics</title></head>\n"
-            "<body>\n"
-            "<h1>Server Statistics</h1>\n"
-            "<table border='1'>\n"
-            "<tr><td>Total Requests</td><td>%ld</td></tr>\n"
-            "<tr><td>Completed Requests</td><td>%ld</td></tr>\n"
-            "<tr><td>Bytes Transferred</td><td>%ld</td></tr>\n"
-            "<tr><td>Average Response Time</td><td>%.4f s</td></tr>\n"
-            "<tr><td>Active Connections</td><td>%d</td></tr>\n"
-            "<tr><td>Queue Size</td><td>%d</td></tr>\n"
-            "<tr><td>Status 200 (OK)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 400 (Bad Request)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 403 (Forbidden)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 404 (Not Found)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 500 (Internal Error)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 501 (Not Implemented)</td><td>%ld</td></tr>\n"
-            "<tr><td>Status 503 (Service Unavailable)</td><td>%ld</td></tr>\n"
-            "</table>\n"
-            "</body></html>\n",
+        time_t current_time = time(NULL);
+        long uptime_seconds = (long)(current_time - args->shared->stats.server_start_time);
+        
+        char json_body[2048];
+        snprintf(json_body, sizeof(json_body),
+            "{\n"
+            "  \"total_requests\": %ld,\n"
+            "  \"total_bytes\": %ld,\n"
+            "  \"requests_by_status\": {\n"
+            "    \"200\": %ld,\n"
+            "    \"400\": %ld,\n"
+            "    \"403\": %ld,\n"
+            "    \"404\": %ld,\n"
+            "    \"500\": %ld,\n"
+            "    \"501\": %ld,\n"
+            "    \"503\": %ld\n"
+            "  },\n"
+            "  \"active_connections\": %d,\n"
+            "  \"avg_response_time_ms\": %.2f,\n"
+            "  \"uptime_seconds\": %ld\n"
+            "}",
             args->shared->stats.total_requests,
-            args->shared->stats.completed_requests,
             args->shared->stats.bytes_transferred,
-            avg_response_time,
-            args->shared->stats.active_connections,
-            args->shared->queue.count,
             args->shared->stats.status_200,
             args->shared->stats.status_400,
             args->shared->stats.status_403,
             args->shared->stats.status_404,
             args->shared->stats.status_500,
             args->shared->stats.status_501,
-            args->shared->stats.status_503
+            args->shared->stats.status_503,
+            args->shared->stats.active_connections,
+            avg_response_time_ms,
+            uptime_seconds
         );
+        
         sem_post(args->sems->stats);
         
-        char response[4096];
-        int resp_len = snprintf(response, sizeof(response),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html\r\n"
-            "Content-Length: %zu\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "%s",
-            strlen(stats_body), stats_body
-        );
+        int send_body = (strcmp(req->method, "GET") == 0);
+        long sent = send_json_response(client_fd, json_body, send_body);
         
-        long sent = send(client_fd, response, resp_len, 0);
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_200++;
+        sem_post(args->sems->stats);
+        
+        log_request(args->logger, req->method, req->path, req->version, 200, sent);
+        return sent;
+    }
+    
+    // endpoint /dashboard - mostra dashboard HTML interativo
+    if (strcmp(req->path, "/dashboard") == 0 && (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)) {
+        char html_body[16384];
+        generate_dashboard_html(html_body, sizeof(html_body));
+        
+        int send_body = (strcmp(req->method, "GET") == 0);
+        long sent = send_html_response(client_fd, html_body, send_body);
         
         sem_wait(args->sems->stats);
         args->shared->stats.status_200++;
@@ -478,13 +484,14 @@ static long handle_client_request(int client_fd, HttpRequest *req, thread_args_t
         return sent;
     }
 
+    // resolve virtual host baseado no header Host
+    const char* vroot = resolve_vhost_root(req->hostname, args->config);
+    
     char fullpath[1024];
     if (strcmp(req->path, "/") == 0) {
-        snprintf(fullpath, sizeof(fullpath), "%s/index.html",
-                 args->config->document_root);
+        snprintf(fullpath, sizeof(fullpath), "%s/index.html", vroot);
     } else {
-        snprintf(fullpath, sizeof(fullpath), "%s%s",
-                 args->config->document_root, req->path);
+        snprintf(fullpath, sizeof(fullpath), "%s%s", vroot, req->path);
         
         // adiciona index.html se termina em /
         size_t len = strlen(fullpath);

@@ -28,12 +28,34 @@
             margin-bottom: 30px;
             color: #666;
         }
+        .btn-container {
+            text-align: center;
+            margin-top: 30px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            margin: 0 10px;
+            color: black;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: all 0.3s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Servidor HTTP Multi-Processo</h1>
         <p>Servidor a funcionar</p>
+        <div class="btn-container">
+            <a href="/dashboard" class="btn">Dashboard</a>
+        </div>
     </div>
 </body>
 </html>
