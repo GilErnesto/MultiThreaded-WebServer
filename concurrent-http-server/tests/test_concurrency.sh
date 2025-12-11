@@ -28,7 +28,7 @@ test_apache_bench() {
     local output
     output=$(mktemp)
     
-    if ab -n 10000 -c 100 "${BASE_URL}/index.html" > "$output" 2>&1; then
+    if ab -q -n 10000 -c 100 "${BASE_URL}/index.html" > "$output" 2>&1; then
         local failed_requests
         failed_requests=$(grep "Failed requests:" "$output" | awk '{print $3}')
         

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+set +m
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +13,7 @@ TEST_STRESS="${SCRIPT_DIR}/test_stress.sh"
 TEST_CONCURRENT="${SCRIPT_DIR}/test_concurrent"
 
 FAIL=0
+SERVER_PID=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,16 +21,29 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}========================================"
-echo "   SUITE COMPLETA DE TESTES"
-echo "========================================"
-echo -e "Servidor: ${BASE_URL}${NC}"
-echo ""
+cleanup() {
+    if [ -n "$SERVER_PID" ]; then
+        echo ""
+        echo "A terminar servidor (PID=$SERVER_PID)..."
+        
+        {
+            if ps -p $SERVER_PID > /dev/null 2>&1; then
+                kill -TERM $SERVER_PID 2>/dev/null || true
+                sleep 1
+            fi
+        
+            if ps -p $SERVER_PID > /dev/null 2>&1; then
+                kill -9 $SERVER_PID 2>/dev/null || true
+                sleep 0.5
+            fi
+            
+            # kill em qualquer outro processo do servidor que ainda corra 
+            pkill -9 -f "./server" 2>/dev/null || true
+        } 2>/dev/null
+    fi
+}
 
-# variáveis para os sub-scripts
-export BASE_URL
-export SERVER_BIN="${SERVER_BIN:-./server}"
-export LOG_FILE="${LOG_FILE:-server.log}"
+trap cleanup EXIT INT TERM
 
 run_test_suite() {
     local test_file="$1"
@@ -62,9 +77,48 @@ run_test_suite() {
     fi
 }
 
+start_server() {
+    local server_bin="${SERVER_BIN:-./server}"
+    
+    if [ ! -x "$server_bin" ]; then
+        echo -e "${RED}Erro: servidor '$server_bin' não encontrado ou não executável${NC}"
+        exit 1
+    fi
+    
+    echo "A arrancar servidor: $server_bin"
+    setsid "$server_bin" > /dev/null 2>&1 &
+    SERVER_PID=$!
+    disown
+    
+    echo "Aguardando servidor inicializar (5s)..."
+    sleep 5
+    
+    if ! ps -p $SERVER_PID > /dev/null 2>&1; then
+        echo -e "${RED}Erro: servidor falhou ao arrancar${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}Servidor arrancado com PID=$SERVER_PID${NC}"
+}
+
 main() {
     local run_mode="${1:-normal}"
     
+    echo -e "${BLUE}========================================"
+    echo "   SUITE COMPLETA DE TESTES"
+    echo "========================================"
+    echo -e "Servidor: ${BASE_URL}${NC}"
+    echo ""
+    
+    # variáveis para os sub-scripts
+    export BASE_URL
+    export SERVER_BIN="${SERVER_BIN:-./server}"
+    export LOG_FILE="${LOG_FILE:-server.log}"
+    
+    # Arrancar servidor
+    start_server
+    
+    # Executar testes conforme modo
     case "$run_mode" in
         quick|fast)
             echo "Modo rápido - a executar apenas testes essenciais"
@@ -128,7 +182,7 @@ main() {
             
             echo ""
             echo -e "${YELLOW}Nota: Testes de sincronização e stress não executados em modo normal${NC}"
-            echo -e "${YELLOW}Use 'test_all.sh full' para executar todos os testes${NC}"
+            echo -e "${YELLOW}Use 'make testFull' para executar todos os testes${NC}"
             ;;
     esac
     

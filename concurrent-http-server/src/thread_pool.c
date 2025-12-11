@@ -4,6 +4,7 @@
 #include "thread_pool.h"
 #include "http.h"
 #include "cache.h"
+#include "worker.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -11,7 +12,22 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <errno.h>
 #include <time.h>
+
+// Fila local de trabalho dentro do worker (com condition variables)
+typedef struct {
+    int *queue;
+    int capacity;
+    int size;
+    int front;
+    int rear;
+    int stopping;
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+} local_queue_t;
 
 // Estrutura de argumentos para threads
 typedef struct {
@@ -21,11 +37,88 @@ typedef struct {
     logger_t        *logger;
     cache_t         *cache;
     int             server_fd;
+    local_queue_t   *local_queue;
 } thread_args_t;
 
 // Declaração forward das funções
 static void* worker_thread(void *arg);
+static void* dispatcher_thread(void *arg);
 static long handle_client(int client_fd, thread_args_t *args);
+
+// Funções para fila local
+static local_queue_t* create_local_queue(int capacity) {
+    local_queue_t *q = malloc(sizeof(local_queue_t));
+    if (!q) return NULL;
+    
+    q->queue = malloc(capacity * sizeof(int));
+    if (!q->queue) {
+        free(q);
+        return NULL;
+    }
+    
+    q->capacity = capacity;
+    q->size = 0;
+    q->front = 0;
+    q->rear = 0;
+    q->stopping = 0;
+    
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->not_empty, NULL);
+    pthread_cond_init(&q->not_full, NULL);
+    
+    return q;
+}
+
+static void destroy_local_queue(local_queue_t *q) {
+    if (!q) return;
+    pthread_mutex_destroy(&q->mutex);
+    pthread_cond_destroy(&q->not_empty);
+    pthread_cond_destroy(&q->not_full);
+    free(q->queue);
+    free(q);
+}
+
+static void local_queue_push(local_queue_t *q, int fd) {
+    pthread_mutex_lock(&q->mutex);
+    
+    while (q->size >= q->capacity && !q->stopping) {
+        pthread_cond_wait(&q->not_full, &q->mutex);
+    }
+
+    if (q->stopping) {
+        pthread_mutex_unlock(&q->mutex);
+        return;
+    }
+    
+    q->queue[q->rear] = fd;
+    q->rear = (q->rear + 1) % q->capacity;
+    q->size++;
+    
+    pthread_cond_signal(&q->not_empty);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+static int local_queue_pop(local_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    
+    while (q->size == 0 && !q->stopping) {
+        pthread_cond_wait(&q->not_empty, &q->mutex);
+    }
+
+    if (q->stopping && q->size == 0) {
+        pthread_mutex_unlock(&q->mutex);
+        return -1;
+    }
+    
+    int fd = q->queue[q->front];
+    q->front = (q->front + 1) % q->capacity;
+    q->size--;
+    
+    pthread_cond_signal(&q->not_full);
+    pthread_mutex_unlock(&q->mutex);
+    
+    return fd;
+}
 
 void thread_pool_start(shared_data_t *shared, 
                       semaphores_t *sems, 
@@ -47,6 +140,13 @@ void thread_pool_start(shared_data_t *shared,
     if (max_bytes == 0) max_bytes = 1 * 1024 * 1024; // mínimo 1MB
     cache_init(cache, max_bytes);
 
+    // Criar fila local com condition variables
+    local_queue_t *local_queue = create_local_queue(config->max_queue_size);
+    if (!local_queue) {
+        perror("create_local_queue");
+        exit(1);
+    }
+
     // Preparar argumentos para as threads
     thread_args_t args;
     args.shared = shared;
@@ -55,32 +155,83 @@ void thread_pool_start(shared_data_t *shared,
     args.logger = logger;
     args.cache = cache;
     args.server_fd = server_fd;
+    args.local_queue = local_queue;
 
-    // Criar array de threads
-    pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
+    // Criar array de threads (worker threads + 1 dispatcher)
+    pthread_t *threads = malloc((num_threads + 1) * sizeof(pthread_t));
     if (!threads) {
         perror("malloc threads");
         exit(1);
     }
 
-    // Criar threads
+    // Criar thread dispatcher (consome da fila global, coloca na local)
+    if (pthread_create(&threads[0], NULL, dispatcher_thread, &args) != 0) {
+        perror("pthread_create dispatcher");
+        exit(1);
+    }
+
+    // Criar threads trabalhadoras (consomem da fila local)
     for (int i = 0; i < num_threads; i++) {
-        if (pthread_create(&threads[i], NULL, worker_thread, &args) != 0) {
-            perror("pthread_create");
+        if (pthread_create(&threads[i+1], NULL, worker_thread, &args) != 0) {
+            perror("pthread_create worker");
             exit(1);
         }
     }
 
-    // O processo worker mantém-se vivo; as threads fazem o trabalho
-    // Bloquear para sempre
-    for (;;) {
+    // Aguarda pedido de shutdown (SIGTERM define worker_shutdown)
+    while (!worker_shutdown) {
         pause();
     }
 
-    // Cleanup (nunca chega aqui em operação normal)
+    // Sinaliza paragem para fila local
+    pthread_mutex_lock(&local_queue->mutex);
+    local_queue->stopping = 1;
+    pthread_cond_broadcast(&local_queue->not_empty);
+    pthread_cond_broadcast(&local_queue->not_full);
+    pthread_mutex_unlock(&local_queue->mutex);
+
+    // Espera dispatcher + workers
+    pthread_join(threads[0], NULL);
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(threads[i+1], NULL);
+    }
+
+    // Cleanup
+    destroy_local_queue(local_queue);
     cache_destroy(cache);
     free(cache);
     free(threads);
+}
+
+// Thread dispatcher: faz accept() no server socket e distribui para fila local
+static void* dispatcher_thread(void *arg) {
+    thread_args_t *args = (thread_args_t*)arg;
+    local_queue_t *local_queue = args->local_queue;
+    int server_fd = args->server_fd;
+    printf("[WORKER PID=%d] Dispatcher thread started, will accept on fd=%d\n", getpid(), server_fd);
+    
+    for (;;) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd < 0) {
+            if (errno == EINTR && worker_shutdown) {
+                break; // sinal de shutdown
+            }
+            if (errno == EINTR) continue;
+            if (errno == EBADF || errno == EINVAL) break; // socket fechado
+            perror("accept failed (dispatcher)");
+            continue;
+        }
+        local_queue_push(local_queue, client_fd);
+    }
+
+    pthread_mutex_lock(&local_queue->mutex);
+    local_queue->stopping = 1;
+    pthread_cond_broadcast(&local_queue->not_empty);
+    pthread_cond_broadcast(&local_queue->not_full);
+    pthread_mutex_unlock(&local_queue->mutex);
+    return NULL;
 }
 
 // Função executada por cada thread do pool
@@ -88,17 +239,24 @@ static void* worker_thread(void *arg) {
     thread_args_t *args = (thread_args_t*)arg;
     shared_data_t *shared = args->shared;
     semaphores_t  *sems   = args->sems;
+    local_queue_t *local_queue = args->local_queue;
 
     for (;;) {
-        // Consome uma conexão da fila (modelo producer-consumer)
-        int client_fd = dequeue_connection(shared, sems);
+        // Consome da fila local (com condition variables)
+        int client_fd = local_queue_pop(local_queue);
         if (client_fd < 0) {
-            perror("dequeue_connection failed (worker thread)");
+            break; // shutdown
+        }
+        
+        // Validar fd novamente
+        if (client_fd < 3) {
+            fprintf(stderr, "[WORKER THREAD PID=%d] Invalid fd from queue: %d\n", getpid(), client_fd);
             continue;
         }
 
-        // Incrementar conexões ativas
+        // Contabilizar pedido aceito e conexões ativas
         sem_wait(sems->stats);
+        shared->stats.total_requests++;
         shared->stats.active_connections++;
         sem_post(sems->stats);
 
@@ -172,6 +330,36 @@ static long handle_client(int client_fd, thread_args_t *args) {
     }
 
     // Endpoints especiais
+    // Endpoint /cause400 - gera erro 400 intencionalmente
+    if (strcmp(req.path, "/cause400") == 0) {
+        long sent = send_error(client_fd,
+                   "HTTP/1.1 400 Bad Request",
+                   "<h1>400 Bad Request</h1><p>This error was intentionally triggered for testing.</p>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_400++;
+        sem_post(args->sems->stats);
+        
+        log_request(args->logger, req.method, req.path, req.version, 400, sent);
+        close(client_fd);
+        return sent;
+    }
+    
+    // Endpoint /cause501 - gera erro 501 intencionalmente
+    if (strcmp(req.path, "/cause501") == 0) {
+        long sent = send_error(client_fd,
+                   "HTTP/1.1 501 Not Implemented",
+                   "<h1>501 Not Implemented</h1><p>This error was intentionally triggered for testing.</p>");
+        
+        sem_wait(args->sems->stats);
+        args->shared->stats.status_501++;
+        sem_post(args->sems->stats);
+        
+        log_request(args->logger, req.method, req.path, req.version, 501, sent);
+        close(client_fd);
+        return sent;
+    }
+    
     // Endpoint /stats - retorna estatísticas do servidor
     if (strcmp(req.path, "/stats") == 0 && strcmp(req.method, "GET") == 0) {
         sem_wait(args->sems->stats);

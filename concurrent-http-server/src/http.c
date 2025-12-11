@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <errno.h>
 
 // ------------------------
 //  MIME TYPES
@@ -176,12 +177,35 @@ int parse_http_request(const char *buffer, HttpRequest *req) {
 //  READ HTTP REQUEST
 
 ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
+    // Validar file descriptor
+    if (client_fd < 0) {
+        return -1;
+    }
+    
+    // Configurar timeout de 30 segundos para leitura
+    struct timeval timeout;
+    timeout.tv_sec = 30;  // TIMEOUT_SECONDS padrão
+    timeout.tv_usec = 0;
+    
+    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        // Apenas loga o erro se for um erro diferente de EBADF
+        if (errno != EBADF) {
+            perror("setsockopt SO_RCVTIMEO");
+        }
+        // Continua mesmo com erro - não é crítico
+    }
+    
     size_t total = 0;
 
     while (total < size - 1) {
         ssize_t n = recv(client_fd, buffer + total, size - 1 - total, 0);
         if (n < 0) {
-            perror("recv");
+            // Verifica se foi timeout
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                fprintf(stderr, "Connection timeout on recv\n");
+            } else {
+                perror("recv");
+            }
             break;
         }
         if (n == 0) {

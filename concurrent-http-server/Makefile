@@ -57,8 +57,8 @@ run: all
 
 # Testes normais (essenciais)
 testSimple: $(TARGET) $(TEST_CONCURRENT)
-	@$(TEST_DIR)/run_with_server.sh ./$(TARGET) normal
+	@$(TEST_DIR)/test.sh normal
 
 # Testes completos (incluindo sync e stress)
 testFull: $(TARGET) $(TEST_CONCURRENT)
-	@$(TEST_DIR)/run_with_server.sh ./$(TARGET) full
+	@$(TEST_DIR)/test.sh full

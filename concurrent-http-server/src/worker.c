@@ -1,13 +1,35 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
+#include <string.h>
 
 #include "worker.h"
 #include "stats.h"
 #include "logger.h"
 #include "thread_pool.h"
 
+volatile sig_atomic_t worker_shutdown = 0;
+
+static void worker_shutdown_handler(int sig) {
+    (void)sig;
+    worker_shutdown = 1;
+    // Apenas marca para shutdown, o accept() vai retornar com erro
+}
+
 void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *config, int server_fd) {
+    // Configurar handler para SIGTERM
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = worker_shutdown_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("sigaction SIGTERM (worker)");
+    }
     
     printf("[WORKER PID=%d] Reabrindo semáforos...\n", getpid());
     fflush(stdout);

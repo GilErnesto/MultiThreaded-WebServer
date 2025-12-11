@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #define SHM_NAME "/webserver_shm"
 
@@ -114,9 +115,9 @@ void destroy_semaphores(semaphores_t *s) {
 
 // Função para enfileirar uma conexão (produtor = master)
 int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd) {
-    // Espera por espaço livre na fila
-    if (sem_wait(sems->empty) != 0) {
-        return -1;
+    // Tenta espaço livre; se cheio retorna -1 sem bloquear
+    if (sem_trywait(sems->empty) != 0) {
+        return -1; // fila cheia
     }
     
     // Exclusão mútua para manipular a fila
@@ -141,7 +142,8 @@ int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd)
 // Função para desenfileirar uma conexão (consumidor = worker thread)
 int dequeue_connection(shared_data_t *shared, semaphores_t *sems) {
     // Espera por item disponível na fila
-    if (sem_wait(sems->full) != 0) {
+    while (sem_wait(sems->full) != 0) {
+        if (errno == EINTR) return -1; // acordou por sinal (shutdown)
         return -1;
     }
     
