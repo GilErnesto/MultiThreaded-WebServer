@@ -3,7 +3,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-// Procurar entrada por path
 static int find_entry(cache_t *cache, const char *path) {
     for (int i = 0; i < CACHE_MAX_ENTRIES; i++) {
         if (cache->entries[i].in_use &&
@@ -14,7 +13,7 @@ static int find_entry(cache_t *cache, const char *path) {
     return -1;
 }
 
-// LRU eviction
+// remove entrada menos usada (LRU)
 static int evict_victim(cache_t *cache, size_t needed) {
     if (cache->used_bytes + needed <= cache->max_bytes)
         return -1;
@@ -59,9 +58,9 @@ void cache_destroy(cache_t *cache) {
     pthread_rwlock_destroy(&cache->lock);
 }
 
-// HIT = devolve 1; MISS = devolve 0
+// retorna 1 se encontrar, 0 caso contrário
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size) {
-    pthread_rwlock_wrlock(&cache->lock);  // ← WRITE lock desde início
+    pthread_rwlock_wrlock(&cache->lock);
     
     int idx = find_entry(cache, path);
     if (idx < 0) {
@@ -73,7 +72,6 @@ int cache_get(cache_t *cache, const char *path, const char **data, size_t *size)
     *data = e->data;
     *size = e->size;
     
-    // Atualiza LRU enquanto tem o lock
     cache->counter++;
     e->last_used = cache->counter;
     

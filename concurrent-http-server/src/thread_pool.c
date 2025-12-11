@@ -16,7 +16,7 @@
 #include <errno.h>
 #include <time.h>
 
-// Fila local de trabalho dentro do worker (com condition variables)
+// fila local com condition variables
 typedef struct {
     int *queue;
     int capacity;
@@ -29,7 +29,6 @@ typedef struct {
     pthread_cond_t not_full;
 } local_queue_t;
 
-// Estrutura de argumentos para threads
 typedef struct {
     shared_data_t   *shared;
     semaphores_t    *sems;
@@ -40,12 +39,10 @@ typedef struct {
     local_queue_t   *local_queue;
 } thread_args_t;
 
-// Declaração forward das funções
 static void* worker_thread(void *arg);
 static void* dispatcher_thread(void *arg);
-static long handle_client(int client_fd, thread_args_t *args);
+static long handle_client_request(int client_fd, HttpRequest *req, thread_args_t *args, int *keep_alive);
 
-// Funções para fila local
 static local_queue_t* create_local_queue(int capacity) {
     local_queue_t *q = malloc(sizeof(local_queue_t));
     if (!q) return NULL;
@@ -129,7 +126,6 @@ void thread_pool_start(shared_data_t *shared,
     int num_threads = config->threads_per_worker;
     if (num_threads <= 0) num_threads = 1;
 
-    // Inicializar cache
     cache_t *cache = malloc(sizeof(cache_t));
     if (!cache) {
         perror("malloc cache");
@@ -137,17 +133,15 @@ void thread_pool_start(shared_data_t *shared,
     }
     
     size_t max_bytes = (size_t)config->cache_size_mb * 1024 * 1024;
-    if (max_bytes == 0) max_bytes = 1 * 1024 * 1024; // mínimo 1MB
+    if (max_bytes == 0) max_bytes = 1 * 1024 * 1024;
     cache_init(cache, max_bytes);
 
-    // Criar fila local com condition variables
     local_queue_t *local_queue = create_local_queue(config->max_queue_size);
     if (!local_queue) {
         perror("create_local_queue");
         exit(1);
     }
 
-    // Preparar argumentos para as threads
     thread_args_t args;
     args.shared = shared;
     args.sems = sems;
@@ -157,20 +151,19 @@ void thread_pool_start(shared_data_t *shared,
     args.server_fd = server_fd;
     args.local_queue = local_queue;
 
-    // Criar array de threads (worker threads + 1 dispatcher)
     pthread_t *threads = malloc((num_threads + 1) * sizeof(pthread_t));
     if (!threads) {
         perror("malloc threads");
         exit(1);
     }
 
-    // Criar thread dispatcher (consome da fila global, coloca na local)
+    // thread dispatcher: aceita conexões e distribui
     if (pthread_create(&threads[0], NULL, dispatcher_thread, &args) != 0) {
         perror("pthread_create dispatcher");
         exit(1);
     }
 
-    // Criar threads trabalhadoras (consomem da fila local)
+    // threads trabalhadoras
     for (int i = 0; i < num_threads; i++) {
         if (pthread_create(&threads[i+1], NULL, worker_thread, &args) != 0) {
             perror("pthread_create worker");
@@ -178,32 +171,27 @@ void thread_pool_start(shared_data_t *shared,
         }
     }
 
-    // Aguarda pedido de shutdown (SIGTERM define worker_shutdown)
     while (!worker_shutdown) {
         pause();
     }
 
-    // Sinaliza paragem para fila local
     pthread_mutex_lock(&local_queue->mutex);
     local_queue->stopping = 1;
     pthread_cond_broadcast(&local_queue->not_empty);
     pthread_cond_broadcast(&local_queue->not_full);
     pthread_mutex_unlock(&local_queue->mutex);
 
-    // Espera dispatcher + workers
     pthread_join(threads[0], NULL);
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i+1], NULL);
     }
 
-    // Cleanup
     destroy_local_queue(local_queue);
     cache_destroy(cache);
     free(cache);
     free(threads);
 }
 
-// Thread dispatcher: faz accept() no server socket e distribui para fila local
 static void* dispatcher_thread(void *arg) {
     thread_args_t *args = (thread_args_t*)arg;
     local_queue_t *local_queue = args->local_queue;
@@ -216,10 +204,10 @@ static void* dispatcher_thread(void *arg) {
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) {
             if (errno == EINTR && worker_shutdown) {
-                break; // sinal de shutdown
+                break;
             }
             if (errno == EINTR) continue;
-            if (errno == EBADF || errno == EINVAL) break; // socket fechado
+            if (errno == EBADF || errno == EINVAL) break;
             perror("accept failed (dispatcher)");
             continue;
         }
@@ -234,7 +222,6 @@ static void* dispatcher_thread(void *arg) {
     return NULL;
 }
 
-// Função executada por cada thread do pool
 static void* worker_thread(void *arg) {
     thread_args_t *args = (thread_args_t*)arg;
     shared_data_t *shared = args->shared;
@@ -242,79 +229,112 @@ static void* worker_thread(void *arg) {
     local_queue_t *local_queue = args->local_queue;
 
     for (;;) {
-        // Consome da fila local (com condition variables)
         int client_fd = local_queue_pop(local_queue);
         if (client_fd < 0) {
-            break; // shutdown
+            break;
         }
         
-        // Validar fd novamente
         if (client_fd < 3) {
             fprintf(stderr, "[WORKER THREAD PID=%d] Invalid fd from queue: %d\n", getpid(), client_fd);
             continue;
         }
 
-        // Contabilizar pedido aceito e conexões ativas
+        // HTTP Keep-Alive: processar múltiplos requests na mesma conexão
+        const int max_requests = 50;
+        int requests_count = 0;
+        int keep_alive = 1;
+        
+        // incrementa active_connections uma vez por conexão
         sem_wait(sems->stats);
-        shared->stats.total_requests++;
         shared->stats.active_connections++;
         sem_post(sems->stats);
-
-        // Marca o início do processamento do pedido
-        struct timespec start_time, end_time;
-        clock_gettime(CLOCK_MONOTONIC, &start_time);
-
-        // Processar o pedido HTTP e obter bytes transferidos
-        long bytes = handle_client(client_fd, args);
-
-        // Marca o fim do processamento
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
         
-        // Calcula tempo de resposta em segundos
-        double response_time = (end_time.tv_sec - start_time.tv_sec) + 
-                              (end_time.tv_nsec - start_time.tv_nsec) / 1000000000.0;
+        // timeout de 5 segundos entre requests (Keep-Alive)
+        struct timeval timeout;
+        timeout.tv_sec = 5;
+        timeout.tv_usec = 0;
+        if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+            if (errno != EBADF) {
+                perror("setsockopt SO_RCVTIMEO (keep-alive)");
+            }
+        }
 
-        // Atualizar estatísticas: bytes, tempo de resposta, e decrementar conexões ativas
+        while (keep_alive && requests_count < max_requests) {
+            // ler próximo pedido HTTP
+            char buffer[BUFFER_SIZE];
+            ssize_t bytes_read = read_http_request(client_fd, buffer, sizeof(buffer));
+            
+            // EOF, timeout ou erro → termina conexão
+            if (bytes_read <= 0) {
+                break;
+            }
+            
+            buffer[bytes_read] = '\0';
+            
+            HttpRequest req;
+            if (parse_http_request(buffer, &req) != 0) {
+                // parse falhou → envia erro 400 e termina conexão
+                long sent = send_error(client_fd,
+                           "HTTP/1.1 400 Bad Request",
+                           "<h1>400 Bad Request</h1>");
+                
+                sem_wait(sems->stats);
+                shared->stats.status_400++;
+                shared->stats.total_requests++;
+                shared->stats.bytes_transferred += sent;
+                sem_post(sems->stats);
+                
+                log_request(args->logger, NULL, NULL, NULL, 400, sent);
+                keep_alive = 0;
+                break;
+            }
+            
+            // política Keep-Alive: HTTP/1.1 mantém conexão, HTTP/1.0 fecha
+            if (strcmp(req.version, "HTTP/1.0") == 0) {
+                keep_alive = 0;
+            }
+            
+            // marca início do pedido
+            struct timespec start_time, end_time;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            
+            // incrementa total_requests antes de processar
+            sem_wait(sems->stats);
+            shared->stats.total_requests++;
+            sem_post(sems->stats);
+
+            // processar pedido (sem fechar socket)
+            long bytes_sent = handle_client_request(client_fd, &req, args, &keep_alive);
+
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            
+            double response_time = (end_time.tv_sec - start_time.tv_sec) + 
+                                  (end_time.tv_nsec - start_time.tv_nsec) / 1000000000.0;
+
+            // atualiza stats por pedido
+            sem_wait(sems->stats);
+            shared->stats.bytes_transferred += bytes_sent;
+            shared->stats.total_response_time += response_time;
+            shared->stats.completed_requests++;
+            sem_post(sems->stats);
+            
+            requests_count++;
+        }
+        
+        // fecha conexão e decrementa active_connections
+        close(client_fd);
+        
         sem_wait(sems->stats);
-        shared->stats.bytes_transferred += bytes;
-        shared->stats.total_response_time += response_time;
-        shared->stats.completed_requests++;
         shared->stats.active_connections--;
         sem_post(sems->stats);
     }
 
-    return NULL; // nunca chega aqui
+    return NULL;
 }
 
-// Trata um pedido HTTP num socket já aceite
-static long handle_client(int client_fd, thread_args_t *args) {
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes = read_http_request(client_fd, buffer, sizeof(buffer));
-    if (bytes <= 0) {
-        close(client_fd);
-        return 0;
-    }
-
-    buffer[bytes] = '\0';
-
-    HttpRequest req;
-    if (parse_http_request(buffer, &req) != 0) {
-        long sent = send_error(client_fd,
-                   "HTTP/1.1 400 Bad Request",
-                   "<h1>400 Bad Request</h1>");
-        
-        sem_wait(args->sems->stats);
-        args->shared->stats.status_400++;
-        sem_post(args->sems->stats);
-        
-        log_request(args->logger, NULL, NULL, NULL, 400, sent);
-        
-        close(client_fd);
-        return sent;
-    }
-
-    // directory traversal
-    if (strstr(req.path, "..") != NULL) {
+static long handle_client_request(int client_fd, HttpRequest *req, thread_args_t *args, int *keep_alive) {
+    // previne directory traversal
+    if (strstr(req->path, "..") != NULL) {
         long sent = send_error(client_fd,
                    "HTTP/1.1 403 Forbidden",
                    "<h1>403 Forbidden</h1>");
@@ -323,15 +343,14 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_403++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 403, sent);
+        log_request(args->logger, req->method, req->path, req->version, 403, sent);
         
-        close(client_fd);
+        *keep_alive = 0;
         return sent;
     }
 
-    // Endpoints especiais
-    // Endpoint /cause400 - gera erro 400 intencionalmente
-    if (strcmp(req.path, "/cause400") == 0) {
+    // endpoint /cause400 - testa erro 400
+    if (strcmp(req->path, "/cause400") == 0) {
         long sent = send_error(client_fd,
                    "HTTP/1.1 400 Bad Request",
                    "<h1>400 Bad Request</h1><p>This error was intentionally triggered for testing.</p>");
@@ -340,13 +359,13 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_400++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 400, sent);
-        close(client_fd);
+        log_request(args->logger, req->method, req->path, req->version, 400, sent);
+        *keep_alive = 0;
         return sent;
     }
     
-    // Endpoint /cause501 - gera erro 501 intencionalmente
-    if (strcmp(req.path, "/cause501") == 0) {
+    // endpoint /cause501 - testa erro 501
+    if (strcmp(req->path, "/cause501") == 0) {
         long sent = send_error(client_fd,
                    "HTTP/1.1 501 Not Implemented",
                    "<h1>501 Not Implemented</h1><p>This error was intentionally triggered for testing.</p>");
@@ -355,13 +374,13 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_501++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 501, sent);
-        close(client_fd);
+        log_request(args->logger, req->method, req->path, req->version, 501, sent);
+        *keep_alive = 0;
         return sent;
     }
     
-    // Endpoint /stats - retorna estatísticas do servidor
-    if (strcmp(req.path, "/stats") == 0 && strcmp(req.method, "GET") == 0) {
+    // endpoint /stats - mostra estatísticas
+    if (strcmp(req->path, "/stats") == 0 && strcmp(req->method, "GET") == 0) {
         sem_wait(args->sems->stats);
         
         double avg_response_time = 0.0;
@@ -424,13 +443,12 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_200++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 200, sent);
-        close(client_fd);
+        log_request(args->logger, req->method, req->path, req->version, 200, sent);
         return sent;
     }
     
-    // Endpoint /cause500 - para testes (gera erro 500 intencionalmente)
-    if (strcmp(req.path, "/cause500") == 0) {
+    // endpoint /cause500 - testa erro 500
+    if (strcmp(req->path, "/cause500") == 0) {
         long sent = send_error(client_fd,
                    "HTTP/1.1 500 Internal Server Error",
                    "<h1>500 Internal Server Error</h1><p>This error was intentionally triggered for testing.</p>");
@@ -439,13 +457,13 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_500++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 500, sent);
-        close(client_fd);
+        log_request(args->logger, req->method, req->path, req->version, 500, sent);
+        *keep_alive = 0;
         return sent;
     }
 
-    // apenas GET e HEAD
-    if (strcmp(req.method, "GET") != 0 && strcmp(req.method, "HEAD") != 0) {
+    // só aceita GET e HEAD
+    if (strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0) {
         long sent = send_error(client_fd,
                    "HTTP/1.1 501 Not Implemented",
                    "<h1>501 Not Implemented</h1>");
@@ -454,60 +472,79 @@ static long handle_client(int client_fd, thread_args_t *args) {
         args->shared->stats.status_501++;
         sem_post(args->sems->stats);
         
-        log_request(args->logger, req.method, req.path, req.version, 501, sent);
+        log_request(args->logger, req->method, req->path, req->version, 501, sent);
         
-        close(client_fd);
+        *keep_alive = 0;
         return sent;
     }
 
-    // constrói caminho real a partir da DOCUMENT_ROOT
     char fullpath[1024];
-    if (strcmp(req.path, "/") == 0) {
-        // Raiz → index.html
+    if (strcmp(req->path, "/") == 0) {
         snprintf(fullpath, sizeof(fullpath), "%s/index.html",
                  args->config->document_root);
     } else {
-        // Caminho normal
         snprintf(fullpath, sizeof(fullpath), "%s%s",
-                 args->config->document_root, req.path);
+                 args->config->document_root, req->path);
         
-        // Se o caminho termina em '/', tentar servir index.html desse diretório
+        // adiciona index.html se termina em /
         size_t len = strlen(fullpath);
         if (len > 0 && fullpath[len - 1] == '/') {
-            // Verificar se há espaço suficiente para adicionar "index.html"
             if (len + 10 < sizeof(fullpath)) {
                 strncat(fullpath, "index.html", sizeof(fullpath) - len - 1);
             }
         }
     }
 
-    int send_body = strcmp(req.method, "HEAD") != 0;
+    int send_body = strcmp(req->method, "HEAD") != 0;
     
-    // Verificar se o arquivo existe para determinar o status code antes de enviar
     long sent;
-    if (access(fullpath, F_OK) != 0) {
-        // Arquivo não existe - 404
-        sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
-        sem_wait(args->sems->stats);
-        args->shared->stats.status_404++;
-        sem_post(args->sems->stats);
-        log_request(args->logger, req.method, req.path, req.version, 404, sent);
-    } else if (access(fullpath, R_OK) != 0) {
-        // Sem permissão - 403
-        sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
-        sem_wait(args->sems->stats);
-        args->shared->stats.status_403++;
-        sem_post(args->sems->stats);
-        log_request(args->logger, req.method, req.path, req.version, 403, sent);
+    
+    // processa range request se has_range est\u00e1 ativo
+    if (req->has_range) {
+        // verifica se ficheiro existe antes de processar range
+        if (access(fullpath, F_OK) != 0) {
+            sent = send_error(client_fd, "HTTP/1.1 404 Not Found", "<h1>404 Not Found</h1>");
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_404++;
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 404, sent);
+        } else if (access(fullpath, R_OK) != 0) {
+            sent = send_error(client_fd, "HTTP/1.1 403 Forbidden", "<h1>403 Forbidden</h1>");
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_403++;
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 403, sent);
+        } else {
+            // envia conte\u00fado parcial (HTTP 206 ou 416)
+            sent = send_file_range(client_fd, fullpath, send_body, req->range_start, req->range_end);
+            // send_file_range pode retornar 206 ou 416, assume 206 para stats
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_200++;  // ou criar stats.status_206
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 206, sent);
+        }
     } else {
-        // Arquivo existe e é legível - 200
-        sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
-        sem_wait(args->sems->stats);
-        args->shared->stats.status_200++;
-        sem_post(args->sems->stats);
-        log_request(args->logger, req.method, req.path, req.version, 200, sent);
+        // request normal sem range
+        if (access(fullpath, F_OK) != 0) {
+            sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_404++;
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 404, sent);
+        } else if (access(fullpath, R_OK) != 0) {
+            sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_403++;
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 403, sent);
+        } else {
+            sent = send_file_with_cache(client_fd, fullpath, send_body, args->cache);
+            sem_wait(args->sems->stats);
+            args->shared->stats.status_200++;
+            sem_post(args->sems->stats);
+            log_request(args->logger, req->method, req->path, req->version, 200, sent);
+        }
     }
     
-    close(client_fd);
     return sent;
 }

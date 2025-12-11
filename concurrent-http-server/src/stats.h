@@ -5,7 +5,6 @@
 
 #define MAX_QUEUE_SIZE 100
 
-// Queue de conexões
 typedef struct {
     int sockets[MAX_QUEUE_SIZE];
     int front;
@@ -13,7 +12,6 @@ typedef struct {
     int count;
 } connection_queue_t;
 
-// Estatísticas do servidor
 typedef struct {
     long total_requests;
     long bytes_transferred;
@@ -25,34 +23,30 @@ typedef struct {
     long status_501;
     long status_503;
     int active_connections;
-    double total_response_time;  // soma de todos os tempos de resposta em segundos
-    long completed_requests;     // pedidos completados (para calcular média)
+    double total_response_time;  // soma dos tempos de resposta em segundos
+    long completed_requests;     // para calcular média
 } server_stats_t;
 
-// Estrutura de dados partilhada
 typedef struct {
     connection_queue_t queue;
     server_stats_t stats;
 } shared_data_t;
 
-// Funções para gestão de memória partilhada
 shared_data_t* create_shared_memory();
 void destroy_shared_memory(shared_data_t* data);
 
-// Funções para gestão de semáforos
 typedef struct {
-    sem_t *empty;  // lugares livres na queue
-    sem_t *full;   // lugares ocupados (há trabalho)
-    sem_t *mutex;  // exclusão mútua na queue
-    sem_t *stats;  // para estatísticas
-    sem_t *log;    // para logging
+    sem_t *empty;  // lugares livres
+    sem_t *full;   // lugares ocupados
+    sem_t *mutex;  // exclusão mútua
+    sem_t *stats;
+    sem_t *log;
 } semaphores_t;
 
 int init_semaphores(semaphores_t *s, int max_queue_size);
 int reopen_semaphores(semaphores_t *s);
 void destroy_semaphores(semaphores_t *s);
 
-// Funções para gestão da fila de conexões
 int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd);
 int dequeue_connection(shared_data_t *shared, semaphores_t *sems);
 

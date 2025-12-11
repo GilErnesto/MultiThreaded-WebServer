@@ -16,11 +16,9 @@ volatile sig_atomic_t worker_shutdown = 0;
 static void worker_shutdown_handler(int sig) {
     (void)sig;
     worker_shutdown = 1;
-    // Apenas marca para shutdown, o accept() vai retornar com erro
 }
 
 void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *config, int server_fd) {
-    // Configurar handler para SIGTERM
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = worker_shutdown_handler;
@@ -34,7 +32,6 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     printf("[WORKER PID=%d] Reabrindo semáforos...\n", getpid());
     fflush(stdout);
     
-    // Reabrir semáforos após fork()
     if (reopen_semaphores(sems) != 0) {
         fprintf(stderr, "Erro ao reabrir semáforos no worker\n");
         exit(1);
@@ -43,7 +40,6 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     printf("[WORKER PID=%d] Semáforos reabertos com sucesso\n", getpid());
     fflush(stdout);
     
-    // Criar logger
     printf("[WORKER PID=%d] Criando logger...\n", getpid());
     fflush(stdout);
     logger_t *logger = create_logger(sems, config);
@@ -55,9 +51,8 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     printf("[WORKER PID=%d] Worker process started with %d threads\n", getpid(), config->threads_per_worker);
     fflush(stdout);
 
-    // Iniciar pool de threads - esta função nunca retorna
+    // inicia pool de threads (não retorna)
     thread_pool_start(shared, sems, config, logger, server_fd);
 
-    // Nunca chega aqui
     destroy_logger(logger);
 }

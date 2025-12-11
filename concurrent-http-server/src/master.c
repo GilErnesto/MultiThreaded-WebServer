@@ -19,7 +19,6 @@
 #include "stats.h"
 #include "master.h"
 
-// Variáveis globais para shutdown gracioso
 static volatile sig_atomic_t shutdown_requested = 0;
 static int global_server_fd = -1;
 static pid_t *global_worker_pids = NULL;
@@ -31,20 +30,17 @@ static void sigchld_handler(int sig) {
     (void)sig;
     int saved_errno = errno;
 
-    // Recolhe todos os filhos terminados
     while (waitpid(-1, NULL, WNOHANG) > 0) {
-        // nada
     }
 
     errno = saved_errno;
 }
 
-// Handler para SIGINT e SIGTERM - shutdown gracioso
+// handler para shutdown gracioso
 static void shutdown_handler(int sig) {
     (void)sig;
     shutdown_requested = 1;
     
-    // Mata todos os workers primeiro
     if (global_worker_pids && global_num_workers > 0) {
         for (int i = 0; i < global_num_workers; i++) {
             if (global_worker_pids[i] > 0) {
@@ -53,7 +49,6 @@ static void shutdown_handler(int sig) {
         }
     }
     
-    // Fecha server_fd para quebrar accept()
     if (global_server_fd >= 0) {
         shutdown(global_server_fd, SHUT_RDWR);
         close(global_server_fd);
@@ -61,11 +56,9 @@ static void shutdown_handler(int sig) {
     }
 }
 
-// Função de cleanup completo
 static void cleanup_resources(void) {
     printf("\n[SHUTDOWN] Cleaning up resources...\n");
     
-    // Termina todos os processos worker
     if (global_worker_pids && global_num_workers > 0) {
         printf("[SHUTDOWN] Terminating %d worker processes...\n", global_num_workers);
         for (int i = 0; i < global_num_workers; i++) {
@@ -73,7 +66,6 @@ static void cleanup_resources(void) {
                 kill(global_worker_pids[i], SIGTERM);
             }
         }
-        // Aguarda todos os workers terminarem
         for (int i = 0; i < global_num_workers; i++) {
             if (global_worker_pids[i] > 0) {
                 waitpid(global_worker_pids[i], NULL, 0);
@@ -83,7 +75,6 @@ static void cleanup_resources(void) {
         global_worker_pids = NULL;
     }
     
-    // Fecha e desfaz os semáforos
     printf("[SHUTDOWN] Destroying semaphores...\n");
     if (global_sems.empty) {
         sem_close(global_sems.empty);
@@ -106,7 +97,6 @@ static void cleanup_resources(void) {
         sem_unlink("/web_sem_log");
     }
     
-    // Destroi shared memory
     if (global_shared) {
         printf("[SHUTDOWN] Destroying shared memory...\n");
         munmap(global_shared, sizeof(shared_data_t));
@@ -114,7 +104,6 @@ static void cleanup_resources(void) {
         global_shared = NULL;
     }
     
-    // Fecha server socket se ainda aberto
     if (global_server_fd >= 0) {
         close(global_server_fd);
         global_server_fd = -1;
@@ -130,10 +119,8 @@ int master_main(void) {
         exit(1);
     }
     
-    // Registar atexit para cleanup
     atexit(cleanup_resources);
 
-    // Registar handlers para SIGINT e SIGTERM
     struct sigaction sa_shutdown;
     memset(&sa_shutdown, 0, sizeof(sa_shutdown));
     sa_shutdown.sa_handler = shutdown_handler;
@@ -149,7 +136,6 @@ int master_main(void) {
         exit(1);
     }
 
-    // cria socket TCP IPv4 (listen socket do master)
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     global_server_fd = server_fd;
     if (server_fd < 0) {
@@ -164,7 +150,7 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
     
-    // SO_REUSEPORT permite múltiplos processos fazerem accept() no mesmo socket
+    // SO_REUSEPORT permite múltiplos processos aceitarem no mesmo socket
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
         perror("setsockopt SO_REUSEPORT failed");
         close(server_fd);
@@ -189,7 +175,6 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
 
-    // Registar handler para SIGCHLD
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = sigchld_handler;
@@ -202,7 +187,6 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
 
-    // cria memória partilhada
     shared_data_t *shared = create_shared_memory();
     global_shared = shared;
     if (!shared) {
@@ -211,7 +195,6 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
 
-    // inicializa semáforos
     semaphores_t sems;
     if (init_semaphores(&sems, config.max_queue_size) != 0) {
         fprintf(stderr, "Erro a criar semáforos\n");
@@ -225,7 +208,6 @@ int master_main(void) {
     printf("Creating %d worker processes with %d threads each...\n", 
            config.num_workers, config.threads_per_worker);
 
-    // Criar array para PIDs dos workers
     pid_t *worker_pids = malloc(config.num_workers * sizeof(pid_t));
     global_worker_pids = worker_pids;
     global_num_workers = config.num_workers;
@@ -238,7 +220,6 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
     
-    // Criar N processos worker
     for (int i = 0; i < config.num_workers; i++) {
         pid_t pid = fork();
         
@@ -248,37 +229,28 @@ int master_main(void) {
         }
         
         if (pid == 0) {
-            // PROCESSO FILHO (WORKER)
+            // processo worker
             printf("[WORKER %d] Process started (PID=%d)\n", i, getpid());
             fflush(stdout);
             
-            // Worker VAI usar server_fd para fazer accept()
-            // NÃO fecha o server_fd!
-            
-            // Limpa array de workers (não é o master)
             free(worker_pids);
             global_worker_pids = NULL;
             global_num_workers = 0;
             
-            // Executar loop do worker - NUNCA RETORNA
-            // Passa server_fd para que worker faça accept()
             worker_loop(shared, &sems, &config, server_fd);
             
-            // Se chegar aqui, algo está muito errado
             fprintf(stderr, "[WORKER %d] ERRO: worker_loop retornou!\n", i);
             _exit(1);
         }
         
-        // PROCESSO PAI (MASTER) - guarda PID do worker
         worker_pids[i] = pid;
         printf("[MASTER] Created worker %d with PID %d\n", i, pid);
     }
 
-    // PROCESSO DE ESTATÍSTICAS
     pid_t stats_pid = fork();
     if (stats_pid == 0) {
-        // FILHO ESPECIAL = PROCESSO DE ESTATÍSTICAS
-        close(server_fd); // não precisa do socket
+        // processo de estatísticas
+        close(server_fd);
         
         while (1) {
             sleep(30);
@@ -311,15 +283,13 @@ int master_main(void) {
         exit(0);
     }
 
-    // MASTER delega accept() nos workers via SO_REUSEPORT
     printf("MASTER: Workers will accept connections using SO_REUSEPORT...\n");
     printf("Press Ctrl+C to shutdown gracefully...\n");
 
     while (!shutdown_requested) {
-        pause(); // espera sinais
+        pause();
     }
 
-    // Cleanup será feito por cleanup_resources() via atexit
     printf("\nShutdown requested, exiting main loop...\n");
     return 0;
 }

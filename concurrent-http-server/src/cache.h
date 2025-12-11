@@ -25,7 +25,7 @@ typedef struct {
 void cache_init(cache_t *cache, size_t max_bytes);
 void cache_destroy(cache_t *cache);
 
-// retorna 1 = HIT; 0 = MISS
+// retorna 1 se encontrar, 0 caso contrário
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size);
 
 void cache_put(cache_t *cache, const char *path, const char *data, size_t size);

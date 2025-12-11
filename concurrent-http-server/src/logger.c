@@ -7,30 +7,24 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define MAX_LOG_SIZE (10 * 1024 * 1024)  // 10MB
+#define MAX_LOG_SIZE (10 * 1024 * 1024)
 
-// Função para verificar e fazer rotation do log se necessário
+// faz rotação do log se exceder 10MB
 static void check_and_rotate_log(logger_t *logger) {
     if (!logger || !logger->log_fp || !logger->config) return;
     
-    // Obter tamanho do ficheiro
     struct stat st;
     if (fstat(fileno(logger->log_fp), &st) != 0) {
-        return;  // Erro ao obter estatísticas - ignora rotation
+        return;
     }
     
-    // Se o ficheiro não excede 10MB, não faz nada
     if (st.st_size < MAX_LOG_SIZE) {
         return;
     }
     
-    // Fazer rotation
     printf("[LOG] Log file exceeded 10MB, performing rotation...\n");
     
-    // Fechar ficheiro atual
     fclose(logger->log_fp);
-    
-    // Renomear ficheiro atual para .old
     char old_path[512];
     snprintf(old_path, sizeof(old_path), "%s.old", logger->config->log_file);
     
@@ -58,7 +52,6 @@ logger_t* create_logger(semaphores_t *sems, server_config_t *config) {
         return NULL;
     }
 
-    // Abre ficheiro de log em modo append
     FILE *log_fp = fopen(config->log_file, "a");
     if (!log_fp) {
         perror("fopen log_file");
@@ -95,17 +88,11 @@ void log_request(logger_t *logger,
     char timebuf[64];
     time_t now = time(NULL);
     struct tm tm_buf;
-    struct tm *lt = gmtime_r(&now, &tm_buf);  // para nao dar erro no helgrind
-    if (!lt) return;  // Erro ao converter tempo
-    strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S +0000", lt);  // para nao dar erro no helgrind
+    struct tm *lt = gmtime_r(&now, &tm_buf);
+    if (!lt) return;
+    strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S +0000", lt);
 
-    // Formato aproximado de Apache Combined Log:
-    // %h %l %u [%t] "%r" %>s %b "%{Referer}i" "%{User-agent}i"
-    //
-    // Aqui não temos IP, user, referer, user-agent → usamos "-"
     sem_wait(logger->sems->log);
-    
-    // Verificar se precisa fazer rotation
     check_and_rotate_log(logger);
     
     fprintf(logger->log_fp,

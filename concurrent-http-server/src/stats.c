@@ -15,7 +15,6 @@
 #define SEM_STATS_NAME "/web_sem_stats"
 #define SEM_LOG_NAME   "/web_sem_log"
 
-// Implementação de memória partilhada
 shared_data_t* create_shared_memory() {
     int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (shm_fd == -1) {
@@ -39,7 +38,7 @@ shared_data_t* create_shared_memory() {
         return NULL;
     }
 
-    memset(data, 0, sizeof(shared_data_t));   // queue e stats a zero
+    memset(data, 0, sizeof(shared_data_t));
     data->queue.front = 0;
     data->queue.rear  = 0;
     data->queue.count = 0;
@@ -53,9 +52,7 @@ void destroy_shared_memory(shared_data_t* data) {
     shm_unlink(SHM_NAME);
 }
 
-// Implementação de semáforos
 int init_semaphores(semaphores_t *s, int max_queue_size) {
-    // remove semáforos antigos se existirem
     sem_unlink(SEM_EMPTY_NAME);
     sem_unlink(SEM_FULL_NAME);
     sem_unlink(SEM_MUTEX_NAME);
@@ -80,7 +77,6 @@ int init_semaphores(semaphores_t *s, int max_queue_size) {
 }
 
 int reopen_semaphores(semaphores_t *s) {
-    // Workers precisam reabrir os semáforos após fork()
     s->empty = sem_open(SEM_EMPTY_NAME, 0);
     s->full  = sem_open(SEM_FULL_NAME,  0);
     s->mutex = sem_open(SEM_MUTEX_NAME, 0);
@@ -113,9 +109,8 @@ void destroy_semaphores(semaphores_t *s) {
     sem_unlink(SEM_LOG_NAME);
 }
 
-// Função para enfileirar uma conexão (produtor = master)
 int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd) {
-    // Tenta espaço livre; se cheio retorna -1 sem bloquear
+    // retorna -1 se fila cheia
     if (sem_trywait(sems->empty) != 0) {
         return -1; // fila cheia
     }
@@ -126,41 +121,32 @@ int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd)
         return -1;
     }
     
-    // Adiciona o socket à fila
     shared->queue.sockets[shared->queue.rear] = client_fd;
     shared->queue.rear = (shared->queue.rear + 1) % MAX_QUEUE_SIZE;
     shared->queue.count++;
     
     sem_post(sems->mutex);
-    
-    // Sinaliza que há um item disponível
     sem_post(sems->full);
     
     return 0;
 }
 
-// Função para desenfileirar uma conexão (consumidor = worker thread)
 int dequeue_connection(shared_data_t *shared, semaphores_t *sems) {
-    // Espera por item disponível na fila
     while (sem_wait(sems->full) != 0) {
-        if (errno == EINTR) return -1; // acordou por sinal (shutdown)
+        if (errno == EINTR) return -1;
         return -1;
     }
     
-    // Exclusão mútua para manipular a fila
     if (sem_wait(sems->mutex) != 0) {
         sem_post(sems->full);
         return -1;
     }
     
-    // Remove o socket da fila
     int client_fd = shared->queue.sockets[shared->queue.front];
     shared->queue.front = (shared->queue.front + 1) % MAX_QUEUE_SIZE;
     shared->queue.count--;
     
     sem_post(sems->mutex);
-    
-    // Sinaliza que há espaço livre
     sem_post(sems->empty);
     
     return client_fd;
