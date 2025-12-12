@@ -18,7 +18,6 @@ int load_config(const char* filename, server_config_t* config) {
     FILE* fp = fopen(filename, "r");
     if (!fp) return -1;
 
-    // inicializa vhosts
     config->num_vhosts = 0;
     config->default_vhost[0] = '\0';
 
@@ -61,7 +60,7 @@ int load_config(const char* filename, server_config_t* config) {
             // parsing de virtual hosts: VHOST_hostname=document_root
             else if (strncmp(key, "VHOST_", 6) == 0) {
                 if (config->num_vhosts < MAX_VHOSTS) {
-                    const char* hostname = key + 6; // pula "VHOST_"
+                    const char* hostname = key + 6;
                     strncpy(config->vhosts[config->num_vhosts].hostname, hostname, 
                            sizeof(config->vhosts[config->num_vhosts].hostname) - 1);
                     strncpy(config->vhosts[config->num_vhosts].document_root, value,
@@ -74,7 +73,6 @@ int load_config(const char* filename, server_config_t* config) {
 
     fclose(fp);
     
-    // Validação de parâmetros obrigatórios
     if (config->port <= 0 || config->port > 65535) {
         fprintf(stderr, "ERROR: PORT não configurado ou inválido (deve estar entre 1-65535)\n");
         return -1;
@@ -114,7 +112,7 @@ int load_config(const char* filename, server_config_t* config) {
 // resolve o document_root baseado no hostname (virtual host support)
 const char* resolve_vhost_root(const char* hostname, server_config_t *config) {
     if (!hostname || hostname[0] == '\0') {
-        // sem hostname → usa default_vhost ou DOCUMENT_ROOT
+           // sem hostname → usa default_vhost ou DOCUMENT_ROOT
         if (config->default_vhost[0] != '\0') {
             hostname = config->default_vhost;
         } else {
@@ -146,6 +144,5 @@ const char* resolve_vhost_root(const char* hostname, server_config_t *config) {
         }
     }
 
-    // fallback final: DOCUMENT_ROOT global
     return config->document_root;
 }

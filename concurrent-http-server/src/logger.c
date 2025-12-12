@@ -29,15 +29,11 @@ static void check_and_rotate_log(logger_t *logger) {
     char old_path[512];
     snprintf(old_path, sizeof(old_path), "%s.old", logger->config->log_file);
     
-    // Remove .old anterior se existir
     unlink(old_path);
-    
-    // Renomeia atual para .old
     if (rename(logger->config->log_file, old_path) != 0) {
         perror("rename log file");
     }
     
-    // Reabrir ficheiro (agora vazio) com O_APPEND para escritas atómicas
     logger->log_fd = open(logger->config->log_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (logger->log_fd < 0) {
         perror("open log_file after rotation");
@@ -53,7 +49,6 @@ logger_t* create_logger(semaphores_t *sems, server_config_t *config) {
         return NULL;
     }
 
-    // Use open() with O_APPEND for atomic appends instead of FILE*
     int log_fd = open(config->log_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (log_fd < 0) {
         perror("open log_file");
@@ -109,8 +104,6 @@ void log_request(logger_t *logger,
     sem_wait(logger->sems->log);
     check_and_rotate_log(logger);
     
-    // write() with O_APPEND is atomic for appends up to PIPE_BUF bytes
-    // No need for fflush(), kernel handles atomicity
     ssize_t written = write(logger->log_fd, log_line, len);
     if (written < 0) {
         perror("write log");

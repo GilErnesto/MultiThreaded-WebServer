@@ -114,10 +114,8 @@ void destroy_semaphores(semaphores_t *s) {
 int enqueue_connection(shared_data_t *shared, semaphores_t *sems, int client_fd) {
     // retorna -1 se fila cheia
     if (sem_trywait(sems->empty) != 0) {
-        return -1; // fila cheia
+        return -1;
     }
-    
-    // Exclusão mútua para manipular a fila
     if (sem_wait(sems->mutex) != 0) {
         sem_post(sems->empty);
         return -1;

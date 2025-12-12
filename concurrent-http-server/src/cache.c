@@ -58,9 +58,8 @@ void cache_destroy(cache_t *cache) {
     pthread_rwlock_destroy(&cache->lock);
 }
 
-// retorna 1 se encontrar, 0 caso contrário
 int cache_get(cache_t *cache, const char *path, const char **data, size_t *size) {
-    // Use rdlock for concurrent readers
+    // rdlock permite múltiplos leitores concorrentes
     pthread_rwlock_rdlock(&cache->lock);
     
     int idx = find_entry(cache, path);
@@ -72,10 +71,7 @@ int cache_get(cache_t *cache, const char *path, const char **data, size_t *size)
     cache_entry_t *e = &cache->entries[idx];
     *data = e->data;
     *size = e->size;
-    
-    // Accept minor race in last_used counter for better concurrency
-    // Multiple readers won't corrupt memory, just possibly use stale counter
-    
+       
     pthread_rwlock_unlock(&cache->lock);
     return 1;
 }

@@ -28,7 +28,6 @@ void worker_loop(shared_data_t *shared, semaphores_t *sems, server_config_t *con
     if (sigaction(SIGTERM, &sa, NULL) == -1) {
         perror("sigaction SIGTERM (worker)");
     }
-    
     printf("[WORKER PID=%d] Reabrindo semáforos...\n", getpid());
     fflush(stdout);
     

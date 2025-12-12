@@ -19,7 +19,6 @@
 #include "stats.h"
 #include "master.h"
 
-// Variável de shutdown do worker (definida em worker.c)
 extern volatile sig_atomic_t worker_shutdown;
 
 static volatile sig_atomic_t shutdown_requested = 0;
@@ -153,7 +152,7 @@ int master_main(void) {
         exit(EXIT_FAILURE);
     }
     
-    // SO_REUSEPORT permite múltiplos processos aceitarem no mesmo socket
+    // SO_REUSEPORT: cada worker pode aceitar conexões independentemente
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
         perror("setsockopt SO_REUSEPORT failed");
         close(server_fd);
@@ -232,7 +231,6 @@ int master_main(void) {
         }
         
         if (pid == 0) {
-            // processo worker
             printf("[WORKER %d] Process started (PID=%d)\n", i, getpid());
             fflush(stdout);
             
@@ -242,13 +240,10 @@ int master_main(void) {
             
             worker_loop(shared, &sems, &config, server_fd);
             
-            // worker_loop retorna durante shutdown graceful (SIGTERM)
-            // Verificar se foi shutdown ou erro inesperado
+            // worker_loop só retorna durante shutdown ou erro
             if (worker_shutdown) {
-                // Shutdown normal, sair silenciosamente
                 _exit(0);
             } else {
-                // Erro inesperado
                 fprintf(stderr, "[WORKER %d] ERRO: worker_loop retornou inesperadamente!\n", i);
                 _exit(1);
             }
@@ -260,7 +255,6 @@ int master_main(void) {
 
     pid_t stats_pid = fork();
     if (stats_pid == 0) {
-        // processo de estatísticas
         close(server_fd);
         
         while (1) {

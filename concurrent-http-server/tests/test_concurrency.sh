@@ -190,10 +190,10 @@ test_statistics_accuracy() {
         return
     fi
     
-    # contadores do HTML
+    # contadores do JSON
     local requests_before requests_after
-    requests_before=$(echo "$stats_before" | grep -A1 "Total Requests" | grep -oP '<td>\K\d+(?=</td>)' | head -1 || echo "0")
-    requests_after=$(echo "$stats_after" | grep -A1 "Total Requests" | grep -oP '<td>\K\d+(?=</td>)' | head -1 || echo "0")
+    requests_before=$(echo "$stats_before" | grep -oP '(?<="total_requests":)\s*\d+' | tr -d ' ' || echo "0")
+    requests_after=$(echo "$stats_after" | grep -oP '(?<="total_requests":)\s*\d+' | tr -d ' ' || echo "0")
     
     if [ -z "$requests_before" ]; then requests_before=0; fi
     if [ -z "$requests_after" ]; then requests_after=0; fi

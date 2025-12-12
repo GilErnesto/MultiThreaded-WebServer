@@ -22,7 +22,7 @@ const char* get_mime_type(const char* path) {
     return "application/octet-stream";
 }
 
-// tenta ler página de erro do disco, senão usa fallback
+// tenta página de erro customizada, senão usa fallback
 static long send_error_page(int client_fd, const char* status_line, const char* error_file, const char* fallback_body) {
     char error_path[512];
     snprintf(error_path, sizeof(error_path), "./www/%s", error_file);
@@ -157,21 +157,17 @@ int parse_http_request(const char *buffer, HttpRequest *req) {
     strncpy(req->version, version, sizeof(req->version) - 1);
     req->version[sizeof(req->version) - 1] = '\0';
 
-    // inicializa campos de range
     req->has_range = 0;
     req->range_start = -1;
     req->range_end = -1;
-    
-    // inicializa hostname
     req->hostname[0] = '\0';
 
-    // procura header Host: para virtual host support
+    // extrai hostname para Virtual Host
     const char *host_header = strcasestr(buffer, "Host:");
     if (host_header) {
         const char *host_value = host_header + 5;
         while (*host_value == ' ' || *host_value == '\t') host_value++;
         
-        // copia hostname até encontrar \r, \n, ou espaço
         int i = 0;
         while (host_value[i] != '\0' && host_value[i] != '\r' && 
                host_value[i] != '\n' && host_value[i] != ' ' && 
@@ -182,34 +178,29 @@ int parse_http_request(const char *buffer, HttpRequest *req) {
         req->hostname[i] = '\0';
     }
 
-    // procura header Range: bytes=START-END no buffer completo
+    // parseia Range Request para downloads parciais
     const char *range_header = strcasestr(buffer, "Range:");
     if (range_header) {
-        // encontra o valor após "Range:"
         const char *range_value = range_header + 6;
         while (*range_value == ' ' || *range_value == '\t') range_value++;
         
-        // verifica se começa com "bytes="
         if (strncasecmp(range_value, "bytes=", 6) == 0) {
             range_value += 6;
-            
-            // parseia range: START-END, START-, ou -SUFFIX
             long start = -1, end = -1;
             
             if (*range_value == '-') {
                 // suffix range: -500 (últimos 500 bytes)
                 if (sscanf(range_value, "-%ld", &end) == 1 && end > 0) {
                     req->has_range = 1;
-                    req->range_start = -1;  // indica suffix
-                    req->range_end = end;   // quantidade de bytes do fim
+                    req->range_start = -1;
+                    req->range_end = end;
                 }
             } else {
-                // range normal: START-END ou START-
                 int parsed = sscanf(range_value, "%ld-%ld", &start, &end);
                 if (parsed >= 1 && start >= 0) {
                     req->has_range = 1;
                     req->range_start = start;
-                    req->range_end = (parsed == 2) ? end : -1;  // -1 se open-ended
+                    req->range_end = (parsed == 2) ? end : -1;
                 }
             }
         }
@@ -223,7 +214,6 @@ ssize_t read_http_request(int client_fd, char *buffer, size_t size) {
         return -1;
     }
     
-    // timeout de 30s na leitura
     struct timeval timeout;
     timeout.tv_sec = 30;
     timeout.tv_usec = 0;
@@ -362,9 +352,7 @@ long send_file(int client_fd, const char* fullpath, int send_body) {
     return total_sent;
 }
 
-// envia conteúdo parcial (HTTP 206 Partial Content)
 long send_file_range(int client_fd, const char* fullpath, int send_body, long range_start, long range_end) {
-    // valida acesso ao ficheiro
     if (access(fullpath, F_OK) != 0) {
         return send_error(client_fd, "HTTP/1.1 404 Not Found", "<h1>404 Not Found</h1>");
     }
@@ -372,7 +360,6 @@ long send_file_range(int client_fd, const char* fullpath, int send_body, long ra
         return send_error(client_fd, "HTTP/1.1 403 Forbidden", "<h1>403 Forbidden</h1>");
     }
 
-    // abre ficheiro e determina tamanho
     FILE* file = fopen(fullpath, "rb");
     if (!file) {
         return send_error(client_fd, "HTTP/1.1 500 Internal Server Error", "<h1>500 Internal Server Error</h1>");
@@ -385,21 +372,17 @@ long send_file_range(int client_fd, const char* fullpath, int send_body, long ra
         return send_error(client_fd, "HTTP/1.1 500 Internal Server Error", "<h1>500 Internal Server Error</h1>");
     }
 
-    // processa suffix range (-500 = últimos 500 bytes)
     if (range_start == -1 && range_end > 0) {
         range_start = (file_size > range_end) ? (file_size - range_end) : 0;
         range_end = file_size - 1;
     }
 
-    // processa open-ended range (500- = de 500 até ao fim)
     if (range_end == -1) {
         range_end = file_size - 1;
     }
 
-    // valida range
     if (range_start < 0 || range_end >= file_size || range_start > range_end) {
         fclose(file);
-        // HTTP 416 Range Not Satisfiable
         char error_body[256];
         snprintf(error_body, sizeof(error_body),
                  "<h1>416 Range Not Satisfiable</h1><p>Requested range not satisfiable. File size: %ld bytes</p>",
@@ -433,13 +416,8 @@ long send_file_range(int client_fd, const char* fullpath, int send_body, long ra
         return bytes_sent;
     }
 
-    // calcula tamanho do conteúdo a enviar
     long content_length = range_end - range_start + 1;
-
-    // posiciona no início do range
     fseek(file, range_start, SEEK_SET);
-
-    // lê conteúdo do range para memória
     char *buf = malloc(content_length);
     if (!buf) {
         fclose(file);
@@ -454,7 +432,6 @@ long send_file_range(int client_fd, const char* fullpath, int send_body, long ra
         return send_error(client_fd, "HTTP/1.1 500 Internal Server Error", "<h1>500 Internal Server Error</h1>");
     }
 
-    // prepara headers HTTP 206
     char date_header[128];
     time_t now = time(NULL);
     struct tm tm_buf;
@@ -503,7 +480,6 @@ long send_file_with_cache(int client_fd, const char* fullpath, int send_body, ca
     size_t cached_size = 0;
     long total_sent = 0;
 
-    // tenta cache primeiro
     if (cache && cache_get(cache, fullpath, &cached_data, &cached_size)) {
         char date_header[128];
         time_t now = time(NULL);
@@ -541,10 +517,8 @@ long send_file_with_cache(int client_fd, const char* fullpath, int send_body, ca
         return total_sent;
     }
 
-    // cache miss
     long bytes_sent = send_file(client_fd, fullpath, send_body);
     
-    // adiciona à cache se o ficheiro existe e é pequeno
     if (bytes_sent > 0 && cache && access(fullpath, F_OK) == 0 && access(fullpath, R_OK) == 0) {
         FILE* file = fopen(fullpath, "rb");
         if (file) {
@@ -565,7 +539,6 @@ long send_file_with_cache(int client_fd, const char* fullpath, int send_body, ca
     return bytes_sent;
 }
 
-// envia resposta JSON (para endpoint /stats)
 long send_json_response(int client_fd, const char* json_body, int send_body) {
     char date_header[128];
     time_t now = time(NULL);
@@ -603,7 +576,6 @@ long send_json_response(int client_fd, const char* json_body, int send_body) {
     return total_sent;
 }
 
-// envia resposta HTML (para endpoint /dashboard)
 long send_html_response(int client_fd, const char* html_body, int send_body) {
     char date_header[128];
     time_t now = time(NULL);
@@ -640,7 +612,6 @@ long send_html_response(int client_fd, const char* html_body, int send_body) {
     return total_sent;
 }
 
-// gera página HTML do dashboard com JavaScript inline para auto-refresh
 void generate_dashboard_html(char *buffer, size_t buffer_size) {
     snprintf(buffer, buffer_size,
         "<!DOCTYPE html>\n"
