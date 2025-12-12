@@ -1,32 +1,31 @@
-# Multi-Threaded Web Server with IPC and Semaphores
-
-## Authors
-Rodrigo Machado Pereira - NMec: 125696  
+# Servidor Web Multi-Thread com IPC e Semáforos
+## Autores
+Rodrigo Machado Pereira - NMec: 125696
 Gil Ernesto Leite Guedes - NMec: 125031
 
-## Description
-A concurrent HTTP/1.1 server implemented in C.  
-Uses a master–worker architecture with multiple processes, thread pools, shared memory, and POSIX semaphores.  
-Handles static files with caching, logging, and synchronized statistics.
+## Descrição
+Servidor HTTP/1.1 concorrente implementado em C.
+Usa arquitetura mestre–trabalhadores com múltiplos processos, pools de threads, memória partilhada e semáforos POSIX.
+Serve ficheiros estáticos com cache, registos e estatísticas sincronizadas.
 
-## Compilation
-make            --- build  
-make clean      --- clean  
-make run        --- build + run server  
-make testSimple --- build + run server + simple tests  
-make testFull   --- build + run server + simple tests + complex/long tests
+## Compilação
+make            — compila
+make clean      — limpa
+make run        — compila + executa o servidor
+make testSimple — compila + executa + corre testes simples
+make testFull   — compila + executa + corre testes simples + testes complexos/longos
 
-## Quick Start & Usage
-Before running, set the forbidden page to zero permissions (important to exercise 403 responses):
+## Início Rápido e Utilização
+Antes de executar, defina a página proibida sem permissões:
 ```
 chmod 000 www/privado.html
 ```
 
-To start the server, run either "make && ./server" or "make run".
+Para iniciar o servidor: "make && ./server" ou "make run".
 
-While running you can access `http://localhost:8080/index.html` (port 8080 is the default in `server.conf`) and click **Dashboard** to see the stats. The same stats are also printed periodically in the terminal where the server is running.
+Durante a execução pode aceder a http://localhost:8080/index.html (porta 8080 definida em server.conf) e clicar em Dashboard para ver estatísticas. As mesmas estatísticas aparecem periodicamente no terminal.
 
-To stop, press CTRL+C or run "pkill -f server".
+Para parar: CTRL+C ou "pkill -f server".
 
-## Testing
-There are two test suites: "testSimple" covers functionality and concurrency; "testFull" runs those plus stress, load, and synchronization tests (can take a long time).
+## Testes
+Existem duas suítes de testes: "testSimple" cobre funcionalidade e concorrência; "testFull" inclui também testes de carga, stress e sincronização (demoram mais).
